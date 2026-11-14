@@ -24,10 +24,16 @@ object WebSearch {
         val trusted: Boolean = false
     ) {
         val isPdf get() = forcePdf || looksPdf(url)
+        val isDoc get() = looksDoc(url)
         val domain get() = runCatching { URL(url).host.removePrefix("www.") }.getOrDefault("")
     }
 
     fun looksPdf(u: String) = u.lowercase().substringBefore('?').substringBefore('#').endsWith(".pdf")
+
+    fun looksDoc(u: String): Boolean {
+        val e = u.lowercase().substringBefore('?').substringBefore('#')
+        return e.endsWith(".doc") || e.endsWith(".docx") || e.endsWith(".odt") || e.endsWith(".rtf")
+    }
 
     fun lang(code: String) = LANGS.find { it.code == code } ?: LANGS.first()
 
@@ -65,13 +71,19 @@ object WebSearch {
 
     suspend fun search(
         subject: String, code: String,
-        type: DocType? = null, custom: String = "", medicine: Boolean = false
+        type: DocType? = null, custom: String = "", medicine: Boolean = false, format: String = "pdf"
     ): List<Result> = withContext(Dispatchers.IO) {
         val l = lang(code)
         val (k1, k2) = keywords(code, type, custom)
         val qs = mutableListOf<String>()
-        qs += "$subject $k1 filetype:pdf"
-        qs += if (k2 != k1) "$subject $k2 pdf" else "$subject $k1 pdf"
+        val fileFilter = when (format) {
+            "pdf" -> " filetype:pdf"
+            "doc" -> " (filetype:doc OR filetype:docx)"
+            else -> ""
+        }
+        val suffix = when (format) { "pdf" -> " pdf"; "doc" -> " doc"; else -> "" }
+        qs += "$subject $k1$fileFilter"
+        qs += "$subject ${if (k2 != k1) k2 else k1}$suffix"
         qs += "$subject $k1"
         if (medicine) {
             val sites = medSites(code).take(5).joinToString(" OR ") { "site:$it" }
@@ -79,8 +91,8 @@ object WebSearch {
         }
         val all = coroutineScope {
             val jobs = qs.map { q -> async { runCatching { bing(q, l.code) }.getOrDefault(emptyList()) } } +
-                async { runCatching { ddg("$subject $k1" + if (medicine) "" else " pdf", l.ddg) }.getOrDefault(emptyList()) } +
-                async { if (medicine && code == "en") runCatching { dailyMed(subject) }.getOrDefault(emptyList()) else emptyList() }
+                async { runCatching { ddg("$subject $k1" + if (medicine) "" else suffix, l.ddg) }.getOrDefault(emptyList()) } +
+                async { if (medicine && code == "en" && format != "doc") runCatching { dailyMed(subject) }.getOrDefault(emptyList()) else emptyList() }
             jobs.awaitAll().flatten()
         }
         val tokens = tokens(subject, medicine)
@@ -95,7 +107,7 @@ object WebSearch {
             .sortedWith(
                 compareByDescending<Result> { it.coherent }
                     .thenByDescending { it.trusted }
-                    .thenByDescending { it.isPdf }
+                    .thenByDescending { if (format == "doc") it.isDoc else if (format == "pdf") it.isPdf else false }
             )
             .take(60)
     }

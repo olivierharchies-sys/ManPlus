@@ -70,46 +70,179 @@ import com.olivier.manplus.data.ChatMsg
 import com.olivier.manplus.data.Ref
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.data.WebSearch
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.olivier.manplus.data.ChatHit
+import com.olivier.manplus.data.DOC_TYPES
+import com.olivier.manplus.data.NotPdfException
+import com.olivier.manplus.data.Settings
 import kotlinx.coroutines.launch
 
 // ---------------- Chat ----------------
+/** Chat d'un seul document (ouvert depuis la bibliothèque). */
 @Composable
 fun ChatScreen(nav: NavController, id: String, ask: String = "") {
     val manuals by Repo.manuals.collectAsState()
-    val global = id == Repo.ALL
-    val m = manuals.find { it.id == id }
-    if (!global && m == null) return
-    val scope_ = if (global) manuals else listOfNotNull(m)
+    val m = manuals.find { it.id == id } ?: return
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text(m.product, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = { IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") } },
+            actions = { IconButton({ nav.navigate("viewer/$id") }) { Icon(Icons.AutoMirrored.Filled.List, "Document") } }
+        )
+    }) { pad ->
+        ChatBody(nav, id, Modifier.padding(pad).consumeWindowInsets(pad), ask)
+    }
+}
+
+/**
+ * Corps d'un chat. [id] = Repo.ALL (général), Repo.MED / Repo.MAN (onglets de domaine)
+ * ou l'identifiant d'un document. Dans les onglets de domaine, on peut aussi chercher
+ * des documents sur internet (résultats affichés dans le chat) et scanner un code.
+ */
+@Composable
+fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask: String = "") {
+    val manuals by Repo.manuals.collectAsState()
+    val global = Repo.isScope(id)
+    val docs = remember(manuals, id) { Repo.docsFor(id, manuals) }
+    if (!global && docs.isEmpty()) return
+    val domainTab = id == Repo.MED || id == Repo.MAN
+    val medicine = id == Repo.MED
     val names = remember(manuals) { manuals.associate { it.id to it.product } }
     val msgs = remember(id) { mutableStateListOf<ChatMsg>().apply { addAll(Repo.loadChat(id)) } }
-    var input by rememberSaveable { mutableStateOf("") }
-    var asked by rememberSaveable { mutableStateOf(false) }
+    var input by rememberSaveable(id) { mutableStateOf("") }
+    var asked by rememberSaveable(id) { mutableStateOf(false) }
+    var finding by rememberSaveable(id) { mutableStateOf(domainTab && docs.isEmpty()) }
     var status by remember { mutableStateOf<String?>(null) }
     var stepsOf by remember { mutableStateOf<ChatMsg?>(null) }
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val list = rememberLazyListState()
     val clip = LocalClipboardManager.current
+    val domain = if (medicine) Repo.D_MED else Repo.D_MAN
 
     LaunchedEffect(msgs.size, status) { if (msgs.isNotEmpty()) list.animateScrollToItem(msgs.size - 1) }
+
+    fun post(m: ChatMsg) { msgs += m; Repo.saveChat(id, msgs.toList()) }
+
+    // ---- recherche de documents sur internet, réponse dans le chat ----
+    fun find(label: String, query: String) {
+        if (status != null) return
+        post(ChatMsg(true, label))
+        status = "Recherche sur internet…"
+        scope.launch {
+            val reply = try {
+                val type = DOC_TYPES.find {
+                    it.id == (if (medicine) Settings.typeMed else Settings.typeMan) && it.medicine == medicine
+                }
+                val custom = (if (medicine) Settings.customMed else Settings.customMan).trim()
+                val res = WebSearch.search(
+                    query, Settings.lang, type, custom, medicine, Settings.format
+                )
+                val hits = res.map { ChatHit(it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted) }
+                val hidden = hits.count { !it.coherent }
+                ChatMsg(
+                    false,
+                    if (hits.isEmpty()) "Aucun document trouvé pour « $query ». Essaie un autre nom, une autre langue ou un autre format (Accueil)."
+                    else "${hits.size - hidden} résultat(s) pour « $query ». Touche-en un pour l'ajouter." +
+                        if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "",
+                    query = query, hits = hits
+                )
+            } catch (e: Exception) {
+                ChatMsg(false, "Erreur de recherche : ${e.message}", query = query)
+            }
+            status = null
+            post(reply)
+        }
+    }
+
+    fun openHit(h: ChatHit, product: String) {
+        if (Repo.busy.value != null) return
+        if (h.doc) {
+            try {
+                ctx.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(h.url))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Aucune appli pour ouvrir ce fichier", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        scope.launch {
+            try { nav.openChat(Repo.importUrl(h.url, product.ifBlank { h.title }, null, domain)) }
+            catch (e: NotPdfException) {
+                nav.navigate("browser?url=${Uri.encode(h.url)}&p=${Uri.encode(product)}&d=$domain")
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Échec : ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // ---- scanner (onglets Médicament / Manuel uniquement) ----
+    fun onCode(b: Barcode) {
+        val raw = b.rawValue?.trim().orEmpty()
+        if (raw.isEmpty()) return
+        val url = b.url?.url ?: raw.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        when {
+            url != null ->
+                if (WebSearch.looksPdf(url)) openHit(ChatHit("Document scanné", url, "", true, false, true, false), "")
+                else nav.navigate("browser?url=${Uri.encode(url)}&p=&d=$domain")
+            !medicine && b.format in setOf(
+                Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8, Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E
+            ) -> {
+                status = "Code-barres $raw : recherche du produit…"
+                scope.launch {
+                    val name = WebSearch.productName(raw)
+                    status = null
+                    find("📷 $raw" + if (name != null) " → $name" else "", name ?: raw)
+                }
+            }
+            else -> find("📷 $raw", raw)
+        }
+    }
+
+    fun scan() {
+        try {
+            GmsBarcodeScanning.getClient(ctx).startScan()
+                .addOnSuccessListener { onCode(it) }
+                .addOnFailureListener { Toast.makeText(ctx, "Scan impossible : ${it.message}", Toast.LENGTH_LONG).show() }
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Scanner indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ---- question sur les documents ----
+    fun question(q: String) {
+        if (status != null) return
+        post(ChatMsg(true, q))
+        status = "Recherche dans " + when (id) {
+            Repo.ALL -> "tous les documents…"
+            Repo.MED -> "tes notices…"
+            Repo.MAN -> "tes manuels…"
+            else -> "le document…"
+        }
+        scope.launch {
+            val r = try {
+                AnswerEngine.answer(docs, q, msgs.toList()) { status = it }
+            } catch (e: Exception) {
+                ChatMsg(false, "Erreur : ${e.message}", query = q)
+            }
+            status = null
+            post(r)
+            if (r.steps.isNotEmpty()) stepsOf = r
+        }
+    }
 
     fun send() {
         val q = input.trim()
         if (q.isEmpty() || status != null) return
         input = ""
-        msgs += ChatMsg(true, q)
-        Repo.saveChat(id, msgs.toList())
-        status = "Recherche dans " + (if (global) "tous les manuels…" else "le manuel…")
-        scope.launch {
-            val r = try {
-                AnswerEngine.answer(scope_, q, msgs.toList()) { status = it }
-            } catch (e: Exception) {
-                ChatMsg(false, "Erreur : ${e.message}", query = q)
-            }
-            status = null
-            msgs += r
-            Repo.saveChat(id, msgs.toList())
-            if (r.steps.isNotEmpty()) stepsOf = r
-        }
+        if (domainTab && finding) find(q, q) else question(q)
     }
 
     LaunchedEffect(ask) {
@@ -118,54 +251,69 @@ fun ChatScreen(nav: NavController, id: String, ask: String = "") {
 
     fun openRef(ref: Ref, q: String) = nav.navigate("viewer/${ref.id}?page=${ref.page}&q=${Uri.encode(q)}")
 
-    Scaffold(topBar = {
-        TopAppBar(
-            title = {
-                Text(if (global) "Assistant – tous les manuels" else m!!.product, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            },
-            navigationIcon = { IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") } },
-            actions = {
-                if (!global) IconButton({ nav.navigate("viewer/$id") }) { Icon(Icons.AutoMirrored.Filled.List, "Document") }
-                IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) { Icon(Icons.Default.Delete, "Effacer") }
+    Column(modifier.imePadding().fillMaxSize()) {
+        BusyBar()
+        if (domainTab) Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(finding, { finding = true }, { Text("🔎 Trouver un document") })
+            FilterChip(!finding, { finding = false }, { Text("💬 Question") })
+            Spacer(Modifier.weight(1f))
+            if (msgs.isNotEmpty()) IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) {
+                Icon(Icons.Default.Delete, "Effacer")
             }
-        )
-    }) { pad ->
-        Column(Modifier.padding(pad).consumeWindowInsets(pad).imePadding().fillMaxSize()) {
-            LazyColumn(
-                Modifier.weight(1f).fillMaxWidth(), state = list,
-                contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (msgs.isEmpty()) item {
-                    Text(
-                        (if (global) "Pose une question : la recherche porte sur tes ${manuals.size} manuels.\n"
-                        else "Pose une question sur « ${m!!.product} » (${m.pages} pages).\n") +
-                            "Ex. : Comment détartrer ? Que signifie l'erreur E3 ?",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                items(msgs) { msg ->
-                    Bubble(
-                        msg, if (global) names else emptyMap(),
-                        onRef = { openRef(it, msg.query) },
-                        onSteps = { stepsOf = msg }
-                    )
-                }
-            }
-            status?.let {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
-            }
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    input, { input = it }, Modifier.weight(1f),
-                    placeholder = { Text("Ta question… (ou colle un texte)") }, maxLines = 6,
-                    trailingIcon = {
-                        TextButton({ clip.getText()?.text?.let { input = if (input.isBlank()) it else "$input $it" } }) { Text("Coller") }
-                    }
+        } else if (msgs.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) { Icon(Icons.Default.Delete, "Effacer") }
+        }
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(), state = list,
+            contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (msgs.isEmpty()) item {
+                Text(
+                    when (id) {
+                        Repo.ALL -> "Pose une question : la recherche porte sur tes ${manuals.size} documents (manuels et notices).\n"
+                        Repo.MED -> "Tape le nom d'un médicament (ou scanne la boîte) pour trouver sa notice, puis pose tes questions.\n" +
+                            "Ex. : Dafalgan 1 g"
+                        Repo.MAN -> "Tape le nom d'un produit (ou scanne son code) pour trouver son manuel, puis pose tes questions.\n" +
+                            "Ex. : Bosch WAN282H0FF"
+                        else -> "Pose une question sur « ${docs.first().product} » (${docs.first().pages} pages).\n" +
+                            "Ex. : Comment détartrer ? Que signifie l'erreur E3 ?"
+                    },
+                    style = MaterialTheme.typography.bodyMedium
                 )
-                IconButton({ send() }, enabled = status == null && input.isNotBlank()) {
-                    Icon(Icons.AutoMirrored.Filled.Send, "Envoyer")
+            }
+            items(msgs) { msg ->
+                Bubble(
+                    msg, if (global) names else emptyMap(),
+                    onRef = { openRef(it, msg.query) },
+                    onSteps = { stepsOf = msg },
+                    onHit = { openHit(it, msg.query) }
+                )
+            }
+        }
+        status?.let {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
+        }
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                input, { input = it }, Modifier.weight(1f),
+                placeholder = {
+                    Text(
+                        if (domainTab && finding) (if (medicine) "Nom du médicament…" else "Nom / référence du produit…")
+                        else "Ta question… (ou colle un texte)"
+                    )
+                },
+                maxLines = 6,
+                trailingIcon = {
+                    TextButton({ clip.getText()?.text?.let { input = if (input.isBlank()) it else "$input $it" } }) { Text("Coller") }
                 }
+            )
+            if (domainTab) TextButton({ scan() }) { Text("📷") }
+            IconButton({ send() }, enabled = status == null && input.isNotBlank()) {
+                Icon(Icons.AutoMirrored.Filled.Send, "Envoyer")
             }
         }
     }
@@ -179,7 +327,10 @@ fun ChatScreen(nav: NavController, id: String, ask: String = "") {
 }
 
 @Composable
-private fun Bubble(msg: ChatMsg, names: Map<String, String>, onRef: (Ref) -> Unit, onSteps: () -> Unit) {
+private fun Bubble(
+    msg: ChatMsg, names: Map<String, String>,
+    onRef: (Ref) -> Unit, onSteps: () -> Unit, onHit: (ChatHit) -> Unit
+) {
     Box(Modifier.fillMaxWidth(), contentAlignment = if (msg.fromUser) Alignment.CenterEnd else Alignment.CenterStart) {
         Surface(
             color = if (msg.fromUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -188,6 +339,31 @@ private fun Bubble(msg: ChatMsg, names: Map<String, String>, onRef: (Ref) -> Uni
         ) {
             Column(Modifier.padding(12.dp)) {
                 SelectionContainer { Text(msg.text) }
+                if (msg.hits.isNotEmpty()) {
+                    var showAll by remember { mutableStateOf(false) }
+                    val hidden = msg.hits.count { !it.coherent }
+                    val shown = if (showAll) msg.hits else msg.hits.filter { it.coherent }
+                    shown.forEach { h ->
+                        Column(Modifier.fillMaxWidth().clickable { onHit(h) }.padding(vertical = 6.dp)) {
+                            Text(
+                                (if (!h.coherent) "⚠ incohérent · " else if (h.trusted) "✔ officiel · " else "") +
+                                    (if (h.pdf) "PDF · " else if (h.doc) "Word · " else "Page · ") + h.domain,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            Text(
+                                h.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    if (hidden > 0) Row(
+                        Modifier.fillMaxWidth().clickable { showAll = !showAll },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(showAll, { showAll = it })
+                        Text("Afficher les résultats incohérents ($hidden)", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 if (msg.steps.isNotEmpty()) {
                     Button(onSteps, Modifier.padding(top = 6.dp)) { Text("▶ Pas à pas (${msg.steps.size} étapes)") }
                 }
@@ -208,7 +384,7 @@ private fun Bubble(msg: ChatMsg, names: Map<String, String>, onRef: (Ref) -> Uni
 // ---------------- Navigateur intégré ----------------
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun BrowserScreen(nav: NavController, startUrl: String, product: String) {
+fun BrowserScreen(nav: NavController, startUrl: String, product: String, domain: String = Repo.D_MAN) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var web by remember { mutableStateOf<WebView?>(null) }
@@ -221,7 +397,7 @@ fun BrowserScreen(nav: NavController, startUrl: String, product: String) {
         scope.launch {
             try {
                 val cookie = CookieManager.getInstance().getCookie(url)
-                nav.openChat(Repo.importUrl(url, product, cookie))
+                nav.openChat(Repo.importUrl(url, product, cookie, domain))
             } catch (e: Exception) {
                 Toast.makeText(ctx, "Échec : ${e.message}", Toast.LENGTH_LONG).show()
             }

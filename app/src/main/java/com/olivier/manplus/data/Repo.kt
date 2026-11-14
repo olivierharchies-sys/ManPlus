@@ -21,15 +21,17 @@ import java.util.UUID
 
 data class Manual(
     val id: String, val product: String, val title: String, val source: String,
-    val pages: Int, val chunks: Int, val added: Long
+    val pages: Int, val chunks: Int, val added: Long, val domain: String = Repo.D_MAN
 ) {
     fun toJson() = JSONObject().put("id", id).put("product", product).put("title", title)
         .put("source", source).put("pages", pages).put("chunks", chunks).put("added", added)
+        .put("domain", domain)
 
     companion object {
         fun from(o: JSONObject) = Manual(
             o.getString("id"), o.optString("product"), o.optString("title"), o.optString("source"),
-            o.optInt("pages"), o.optInt("chunks"), o.optLong("added")
+            o.optInt("pages"), o.optInt("chunks"), o.optLong("added"),
+            o.optString("domain").ifBlank { Repo.D_MAN }
         )
     }
 }
@@ -44,24 +46,41 @@ data class Ref(val id: String, val page: Int) {
 
 data class Step(val text: String, val ref: Ref?)
 
+/** Résultat de recherche internet affiché dans un chat. */
+data class ChatHit(
+    val title: String, val url: String, val domain: String,
+    val pdf: Boolean, val doc: Boolean, val coherent: Boolean, val trusted: Boolean
+) {
+    fun toJson() = JSONObject().put("t", title).put("u", url).put("d", domain)
+        .put("p", pdf).put("w", doc).put("c", coherent).put("o", trusted)
+
+    companion object {
+        fun from(o: JSONObject) = ChatHit(
+            o.optString("t"), o.optString("u"), o.optString("d"),
+            o.optBoolean("p"), o.optBoolean("w"), o.optBoolean("c", true), o.optBoolean("o")
+        )
+    }
+}
+
 data class ChatMsg(
     val fromUser: Boolean, val text: String,
     val refs: List<Ref> = emptyList(), val query: String = "", val engine: String = "",
-    val steps: List<Step> = emptyList()
+    val steps: List<Step> = emptyList(), val hits: List<ChatHit> = emptyList()
 ) {
     fun toJson(): JSONObject {
+        val h = JSONArray(); hits.forEach { h.put(it.toJson()) }
         val r = JSONArray(); refs.forEach { r.put(it.toJson()) }
         val s = JSONArray()
         steps.forEach { st -> s.put(JSONObject().put("t", st.text).apply { st.ref?.let { put("r", it.toJson()) } }) }
         return JSONObject().put("u", fromUser).put("t", text).put("r", r)
-            .put("q", query).put("e", engine).put("s", s)
+            .put("q", query).put("e", engine).put("s", s).put("h", h)
     }
 
     companion object {
         fun from(o: JSONObject, defId: String): ChatMsg {
             val refs = o.optJSONArray("r")?.let { a -> (0 until a.length()).map { Ref.from(a.getJSONObject(it)) } }
                 ?: o.optJSONArray("p")?.let { a ->
-                    if (defId == Repo.ALL) emptyList() else (0 until a.length()).map { Ref(defId, a.getInt(it)) }
+                    if (Repo.isScope(defId)) emptyList() else (0 until a.length()).map { Ref(defId, a.getInt(it)) }
                 } ?: emptyList()
             val steps = o.optJSONArray("s")?.let { a ->
                 (0 until a.length()).map { i ->
@@ -69,7 +88,9 @@ data class ChatMsg(
                     Step(so.optString("t"), so.optJSONObject("r")?.let { Ref.from(it) })
                 }
             } ?: emptyList()
-            return ChatMsg(o.optBoolean("u"), o.optString("t"), refs, o.optString("q"), o.optString("e"), steps)
+            val hits = o.optJSONArray("h")?.let { a -> (0 until a.length()).map { ChatHit.from(a.getJSONObject(it)) } }
+                ?: emptyList()
+            return ChatMsg(o.optBoolean("u"), o.optString("t"), refs, o.optString("q"), o.optString("e"), steps, hits)
         }
     }
 }
@@ -147,10 +168,40 @@ object Settings {
     var lang: String
         get() = p.getString("lang", "fr") ?: "fr"
         set(v) = p.edit().putString("lang", v).apply()
+    /** Format de fichier cherché : pdf, doc ou all. */
+    var format: String
+        get() = p.getString("format", "pdf") ?: "pdf"
+        set(v) = p.edit().putString("format", v).apply()
+    var typeMan: String
+        get() = p.getString("typeMan", "manual") ?: "manual"
+        set(v) = p.edit().putString("typeMan", v).apply()
+    var typeMed: String
+        get() = p.getString("typeMed", "leaflet") ?: "leaflet"
+        set(v) = p.edit().putString("typeMed", v).apply()
+    var customMan: String
+        get() = p.getString("customMan", "") ?: ""
+        set(v) = p.edit().putString("customMan", v).apply()
+    var customMed: String
+        get() = p.getString("customMed", "") ?: ""
+        set(v) = p.edit().putString("customMed", v).apply()
 }
 
 object Repo {
-    const val ALL = "ALL"
+    const val ALL = "ALL"   // chat général (tous les documents)
+    const val MED = "MED"   // chat de l'onglet Médicament
+    const val MAN = "MAN"   // chat de l'onglet Manuel
+    const val D_MAN = "manual"
+    const val D_MED = "medicine"
+
+    fun isScope(id: String) = id == ALL || id == MED || id == MAN
+
+    /** Documents couverts par un chat : tous, ceux d'un domaine, ou un seul document. */
+    fun docsFor(id: String, all: List<Manual>): List<Manual> = when (id) {
+        ALL -> all
+        MED -> all.filter { it.domain == D_MED }
+        MAN -> all.filter { it.domain != D_MED }
+        else -> all.filter { it.id == id }
+    }
     const val UA ="Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
 
     lateinit var ctx: Context
@@ -195,7 +246,7 @@ object Repo {
     }
 
     // ---------- import ----------
-    suspend fun importUri(uri: Uri, product: String?): String = withContext(Dispatchers.IO) {
+    suspend fun importUri(uri: Uri, product: String?, domain: String = D_MAN): String = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
         dir(id).mkdirs()
         busy.value = "Copie du fichier…"
@@ -206,10 +257,10 @@ object Repo {
             dir(id).deleteRecursively(); busy.value = null; throw e
         }
         val name = displayName(uri) ?: "Document.pdf"
-        index(id, product?.takeIf { it.isNotBlank() } ?: name.removeSuffix(".pdf"), name, "Téléphone")
+        index(id, product?.takeIf { it.isNotBlank() } ?: name.removeSuffix(".pdf"), name, "Téléphone", domain)
     }
 
-    suspend fun importUrl(url: String, product: String, cookie: String? = null): String = withContext(Dispatchers.IO) {
+    suspend fun importUrl(url: String, product: String, cookie: String? = null, domain: String = D_MAN): String = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
         dir(id).mkdirs()
         busy.value = "Téléchargement…"
@@ -219,7 +270,7 @@ object Repo {
             dir(id).deleteRecursively(); busy.value = null; throw e
         }
         val name = Uri.decode(url.substringBefore('?').substringAfterLast('/')).ifBlank { "Manuel.pdf" }
-        index(id, product.ifBlank { name.removeSuffix(".pdf") }, name, url)
+        index(id, product.ifBlank { name.removeSuffix(".pdf") }, name, url, domain)
     }
 
     private fun fetchPdf(start: String, dest: File, cookie: String?) {
@@ -272,7 +323,7 @@ object Repo {
         }
     } catch (e: Exception) { null }
 
-    private fun index(id: String, product: String, title: String, source: String): String {
+    private fun index(id: String, product: String, title: String, source: String, domain: String): String {
         try {
             busy.value = "Lecture du PDF…"
             val chunks = mutableListOf<Chunk>()
@@ -288,7 +339,7 @@ object Repo {
                 }
             }
             saveChunks(id, chunks)
-            val m = Manual(id, product.trim(), title, source, n, chunks.size, System.currentTimeMillis())
+            val m = Manual(id, product.trim(), title, source, n, chunks.size, System.currentTimeMillis(), domain)
             manuals.value = listOf(m) + manuals.value
             saveIndex()
             return id

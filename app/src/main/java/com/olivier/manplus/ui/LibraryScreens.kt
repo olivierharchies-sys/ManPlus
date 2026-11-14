@@ -96,63 +96,6 @@ fun BusyBar() {
     }
 }
 
-// ---------------- Accueil ----------------
-@Composable
-fun HomeScreen(nav: NavController) {
-    val list by Repo.manuals.collectAsState()
-    var q by rememberSaveable { mutableStateOf("") }
-    val clip = LocalClipboardManager.current
-    fun ask() {
-        val t = q.trim(); if (t.isEmpty()) return
-        q = ""
-        nav.navigate("chat/${Repo.ALL}?ask=${Uri.encode(t)}")
-    }
-    Scaffold(topBar = {
-        TopAppBar(title = { Text("ManPlus") }, actions = {
-            IconButton({ nav.navigate("settings") }) { Icon(Icons.Default.Settings, "Réglages") }
-        })
-    }) { pad ->
-        Column(
-            Modifier.padding(pad).consumeWindowInsets(pad).imePadding().fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Assistant", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Question sur l'ensemble de tes ${list.size} manuels", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(
-                        q, { q = it }, Modifier.fillMaxWidth().padding(top = 8.dp),
-                        placeholder = { Text("Ta question… (ou colle un texte)") }, maxLines = 5,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { ask() }),
-                        trailingIcon = {
-                            TextButton({ clip.getText()?.text?.let { q = if (q.isBlank()) it else "$q $it" } }) { Text("Coller") }
-                        }
-                    )
-                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button({ ask() }, enabled = q.isNotBlank() && list.isNotEmpty()) {
-                            Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(18.dp)); Text("  Demander")
-                        }
-                        OutlinedButton({ nav.navigate("chat/${Repo.ALL}") }) { Text("Ouvrir le chat") }
-                    }
-                }
-            }
-            MenuTile("📚  Mes manuels (${list.size})") { nav.navigate("library") }
-            MenuTile("🔎  Rechercher / ajouter un manuel") { nav.navigate("search") }
-            MenuTile("💊  Notice de médicament") { nav.navigate("search?med=true") }
-            MenuTile("📷  Scanner QR code / code-barres") { nav.navigate("search?scan=true") }
-            MenuTile("⚙  Réglages") { nav.navigate("settings") }
-        }
-    }
-}
-
-@Composable
-private fun MenuTile(label: String, onClick: () -> Unit) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Text(label, Modifier.padding(20.dp), style = MaterialTheme.typography.titleMedium)
-    }
-}
-
 // ---------------- Bibliothèque ----------------
 @Composable
 fun LibraryScreen(nav: NavController) {
@@ -160,22 +103,16 @@ fun LibraryScreen(nav: NavController) {
     var toDelete by remember { mutableStateOf<Manual?>(null) }
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Mes manuels") }, navigationIcon = {
+            TopAppBar(title = { Text("Mes documents") }, navigationIcon = {
                 IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") }
             })
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { nav.navigate("search") },
-                icon = { Icon(Icons.Default.Add, null) }, text = { Text("Ajouter un manuel") }
-            )
         }
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             BusyBar()
             if (list.isEmpty()) {
                 Text(
-                    "Aucun manuel.\nAppuie sur « Ajouter un manuel » et encode le nom du produit.",
+                    "Aucun document.\nUtilise les onglets Médicament ou Manuel pour en chercher un.",
                     Modifier.padding(24.dp), style = MaterialTheme.typography.bodyLarge
                 )
             }
@@ -184,7 +121,7 @@ fun LibraryScreen(nav: NavController) {
                     Card(Modifier.fillMaxWidth().clickable { nav.navigate("chat/${m.id}") }) {
                         Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text(m.product, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text((if (m.domain == Repo.D_MED) "💊 " else "📘 ") + m.product, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Text(
                                     "${m.pages} pages · ${m.title}", style = MaterialTheme.typography.bodySmall,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -207,220 +144,6 @@ fun LibraryScreen(nav: NavController) {
             confirmButton = { TextButton({ Repo.delete(m.id); toDelete = null }) { Text("Supprimer") } },
             dismissButton = { TextButton({ toDelete = null }) { Text("Annuler") } }
         )
-    }
-}
-
-// ---------------- Recherche ----------------
-@Composable
-fun SearchScreen(nav: NavController, autoScan: Boolean = false, startMedicine: Boolean = false) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var product by rememberSaveable { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<WebSearch.Result>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var info by remember { mutableStateOf<String?>(null) }
-    var lang by remember { mutableStateOf(Settings.lang) }
-    var med by rememberSaveable { mutableStateOf(startMedicine) }
-    var typeId by rememberSaveable { mutableStateOf(if (startMedicine) "leaflet" else "manual") }
-    var customType by rememberSaveable { mutableStateOf("") }
-    var showAll by rememberSaveable { mutableStateOf(false) }
-    val busy by Repo.busy.collectAsState()
-    val clip = LocalClipboardManager.current
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) scope.launch {
-            try { nav.openChat(Repo.importUri(uri, product)) }
-            catch (e: Exception) { Toast.makeText(ctx, e.message ?: "Erreur", Toast.LENGTH_LONG).show() }
-        }
-    }
-
-    fun doSearch() {
-        if (product.isBlank() || loading) return
-        loading = true; info = null
-        scope.launch {
-            val custom = if (typeId == CUSTOM_TYPE) customType.trim() else ""
-            val type = DOC_TYPES.find { it.id == typeId && it.medicine == med }
-            results = try { WebSearch.search(product.trim(), lang, type, custom, med) } catch (e: Exception) { emptyList() }
-            loading = false
-            info = when {
-                results.isEmpty() -> "Aucun résultat. Essaie le navigateur intégré."
-                results.none { it.coherent } -> "Tous les résultats semblent incohérents avec « ${product.trim()} » : coche « Afficher les résultats incohérents » pour les voir."
-                else -> null
-            }
-        }
-    }
-
-    fun open(r: WebSearch.Result) {
-        if (busy != null) return
-        scope.launch {
-            try { nav.openChat(Repo.importUrl(r.url, product.ifBlank { r.title })) }
-            catch (e: NotPdfException) {
-                nav.navigate("browser?url=${Uri.encode(r.url)}&p=${Uri.encode(product)}")
-            } catch (e: Exception) {
-                Toast.makeText(ctx, "Échec : ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    // ---- Scan QR / code-barres (Google Code Scanner, sans permission caméra) ----
-    fun onCode(b: Barcode) {
-        val raw = b.rawValue?.trim().orEmpty()
-        if (raw.isEmpty()) return
-        val url = b.url?.url ?: raw.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-        when {
-            url != null -> {
-                info = "QR : $url"
-                if (WebSearch.looksPdf(url)) open(WebSearch.Result(product.ifBlank { "Manuel" }, url, ""))
-                else nav.navigate("browser?url=${Uri.encode(url)}&p=${Uri.encode(product)}")
-            }
-            b.format in setOf(Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8, Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E) -> {
-                info = "Code-barres $raw : recherche du produit…"
-                loading = true
-                scope.launch {
-                    val name = WebSearch.productName(raw)
-                    loading = false
-                    info = if (name != null) "Code-barres $raw → $name" else "Code-barres $raw : produit inconnu, recherche du code"
-                    product = name ?: raw
-                    doSearch()
-                }
-            }
-            else -> { product = raw; info = "Code lu : $raw"; doSearch() }
-        }
-    }
-
-    fun scan() {
-        try {
-            GmsBarcodeScanning.getClient(ctx).startScan()
-                .addOnSuccessListener { onCode(it) }
-                .addOnFailureListener { Toast.makeText(ctx, "Scan impossible : ${it.message}", Toast.LENGTH_LONG).show() }
-        } catch (e: Exception) {
-            Toast.makeText(ctx, "Scanner indisponible : ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    var scanned by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(autoScan) { if (autoScan && !scanned) { scanned = true; scan() } }
-
-    Scaffold(topBar = {
-        TopAppBar(title = { Text(if (med) "Notice de médicament" else "Ajouter un manuel") }, navigationIcon = {
-            IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") }
-        })
-    }) { pad ->
-        Column(Modifier.padding(pad).fillMaxSize()) {
-            OutlinedTextField(
-                product, { product = it }, Modifier.fillMaxWidth().padding(12.dp),
-                label = { Text(if (med) "Nom du médicament (ex. Dafalgan 1 g)" else "Nom / référence du produit") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { doSearch() }),
-                trailingIcon = {
-                    TextButton({ clip.getText()?.text?.let { product = it.trim().replace(Regex("\\s+"), " ") } }) { Text("Coller") }
-                }
-            )
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                FilterChip(
-                    selected = !med,
-                    onClick = { if (med) { med = false; typeId = "manual"; results = emptyList(); info = null } },
-                    label = { Text("📦 Produit") }
-                )
-                FilterChip(
-                    selected = med,
-                    onClick = { if (!med) { med = true; typeId = "leaflet"; results = emptyList(); info = null } },
-                    label = { Text("💊 Médicament") }
-                )
-            }
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                DOC_TYPES.filter { it.medicine == med }.forEach { t ->
-                    FilterChip(
-                        selected = typeId == t.id,
-                        onClick = { typeId = t.id; if (results.isNotEmpty()) doSearch() },
-                        label = { Text(t.label) }
-                    )
-                }
-                FilterChip(
-                    selected = typeId == CUSTOM_TYPE,
-                    onClick = { typeId = CUSTOM_TYPE },
-                    label = { Text("Autre…") }
-                )
-            }
-            if (typeId == CUSTOM_TYPE) {
-                OutlinedTextField(
-                    customType, { customType = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                    label = { Text("Type de document (ex. schéma de câblage)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { doSearch() })
-                )
-            }
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                LANGS.forEach { l ->
-                    FilterChip(
-                        selected = lang == l.code,
-                        onClick = { lang = l.code; Settings.lang = l.code; if (results.isNotEmpty()) doSearch() },
-                        label = { Text(l.label) }
-                    )
-                }
-            }
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button({ scan() }) { Text("📷 Scanner") }
-                Button({ doSearch() }, enabled = product.isNotBlank() && !loading) { Text("Internet") }
-                OutlinedButton({
-                    val u = WebSearch.googleUrl(
-                        product.trim(), lang,
-                        DOC_TYPES.find { it.id == typeId && it.medicine == med },
-                        if (typeId == CUSTOM_TYPE) customType else "", med
-                    )
-                    nav.navigate("browser?url=${Uri.encode(u)}&p=${Uri.encode(product)}")
-                }, enabled = product.isNotBlank()) { Text("Navigateur") }
-                OutlinedButton({ picker.launch(arrayOf("application/pdf")) }) { Text("Téléphone") }
-            }
-            Spacer(Modifier.height(4.dp))
-            BusyBar()
-            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(12.dp))
-            info?.let { Text(it, Modifier.padding(12.dp)) }
-            if (med) Text(
-                "Une notice ne remplace pas l'avis d'un médecin ou d'un pharmacien.",
-                Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall
-            )
-            val hidden = results.count { !it.coherent }
-            if (hidden > 0) {
-                Row(
-                    Modifier.fillMaxWidth().clickable { showAll = !showAll }.padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(showAll, { showAll = it })
-                    Text("Afficher les résultats incohérents ($hidden)", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            val shown = if (showAll) results else results.filter { it.coherent }
-            LazyColumn(Modifier.weight(1f)) {
-                items(shown) { r ->
-                    ListItem(
-                        modifier = Modifier.clickable { open(r) },
-                        overlineContent = {
-                            Text(
-                                (if (!r.coherent) "⚠ incohérent · " else if (r.trusted) "✔ officiel · " else "") +
-                                    (if (r.isPdf) "PDF · " else "Page · ") + r.domain
-                            )
-                        },
-                        headlineContent = { Text(r.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                        supportingContent = if (r.snippet.isBlank()) null else {
-                            { Text(r.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-                        }
-                    )
-                }
-            }
-        }
     }
 }
 
