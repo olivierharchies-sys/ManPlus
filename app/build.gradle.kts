@@ -12,8 +12,8 @@ android {
         applicationId = "com.olivier.manplus"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     signingConfigs {
@@ -58,4 +58,6 @@ dependencies {
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     // Gemini Nano (on-device, ML Kit GenAI Prompt API)
     implementation("com.google.mlkit:genai-prompt:1.0.0-alpha1")
+    // Scan QR / code-barres (Google Code Scanner, sans permission caméra)
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }

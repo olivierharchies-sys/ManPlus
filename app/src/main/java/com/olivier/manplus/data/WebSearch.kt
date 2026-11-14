@@ -7,6 +7,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
 import java.net.HttpURLConnection
@@ -45,6 +46,30 @@ object WebSearch {
         all.distinctBy { it.url.substringBefore('#') }
             .sortedByDescending { it.isPdf }
             .take(40)
+    }
+
+    /** Nom du produit à partir d'un EAN/UPC (Open Products Facts, puis UPCitemdb gratuit). */
+    suspend fun productName(code: String): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val j = JSONObject(get("https://world.openproductsfacts.org/api/v2/product/$code.json"))
+            if (j.optInt("status") != 1) null else {
+                val p = j.getJSONObject("product")
+                val brand = p.optString("brands").substringBefore(',').trim()
+                val name = p.optString("product_name").trim()
+                listOf(brand, name).filter { it.isNotBlank() }.distinct().joinToString(" ").ifBlank { null }
+            }
+        }.getOrNull() ?: runCatching {
+            val it0 = JSONObject(get("https://api.upcitemdb.com/prod/trial/lookup?upc=$code"))
+                .optJSONArray("items")?.optJSONObject(0) ?: return@runCatching null
+            val brand = it0.optString("brand").trim()
+            val model = it0.optString("model").trim()
+            val title = it0.optString("title").trim()
+            when {
+                model.isNotBlank() -> "$brand $model".trim()
+                title.isNotBlank() -> title.take(80)
+                else -> null
+            }
+        }.getOrNull()
     }
 
     private fun get(url: String): String {

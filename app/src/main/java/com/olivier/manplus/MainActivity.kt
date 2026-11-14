@@ -43,7 +43,10 @@ fun AppNav() {
     NavHost(nav, startDestination = "home") {
         composable("home") { HomeScreen(nav) }
         composable("library") { LibraryScreen(nav) }
-        composable("search") { SearchScreen(nav) }
+        composable(
+            "search?scan={scan}",
+            arguments = listOf(navArgument("scan") { type = NavType.BoolType; defaultValue = false })
+        ) { SearchScreen(nav, it.arguments?.getBoolean("scan") ?: false) }
         composable("settings") { SettingsScreen(nav) }
         composable(
             "browser?url={url}&p={p}",

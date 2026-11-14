@@ -70,6 +70,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.olivier.manplus.ai.NanoEngine
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.olivier.manplus.data.LANGS
 import com.olivier.manplus.data.Manual
 import com.olivier.manplus.data.NotPdfException
@@ -134,6 +136,7 @@ fun HomeScreen(nav: NavController) {
             }
             MenuTile("📚  Mes manuels (${list.size})") { nav.navigate("library") }
             MenuTile("🔎  Rechercher / ajouter un manuel") { nav.navigate("search") }
+            MenuTile("📷  Scanner QR code / code-barres") { nav.navigate("search?scan=true") }
             MenuTile("⚙  Réglages") { nav.navigate("settings") }
         }
     }
@@ -205,7 +208,7 @@ fun LibraryScreen(nav: NavController) {
 
 // ---------------- Recherche ----------------
 @Composable
-fun SearchScreen(nav: NavController) {
+fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var product by rememberSaveable { mutableStateOf("") }
@@ -245,6 +248,45 @@ fun SearchScreen(nav: NavController) {
         }
     }
 
+    // ---- Scan QR / code-barres (Google Code Scanner, sans permission caméra) ----
+    fun onCode(b: Barcode) {
+        val raw = b.rawValue?.trim().orEmpty()
+        if (raw.isEmpty()) return
+        val url = b.url?.url ?: raw.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        when {
+            url != null -> {
+                info = "QR : $url"
+                if (WebSearch.looksPdf(url)) open(WebSearch.Result(product.ifBlank { "Manuel" }, url, ""))
+                else nav.navigate("browser?url=${Uri.encode(url)}&p=${Uri.encode(product)}")
+            }
+            b.format in setOf(Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8, Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E) -> {
+                info = "Code-barres $raw : recherche du produit…"
+                loading = true
+                scope.launch {
+                    val name = WebSearch.productName(raw)
+                    loading = false
+                    info = if (name != null) "Code-barres $raw → $name" else "Code-barres $raw : produit inconnu, recherche du code"
+                    product = name ?: raw
+                    doSearch()
+                }
+            }
+            else -> { product = raw; info = "Code lu : $raw"; doSearch() }
+        }
+    }
+
+    fun scan() {
+        try {
+            GmsBarcodeScanning.getClient(ctx).startScan()
+                .addOnSuccessListener { onCode(it) }
+                .addOnFailureListener { Toast.makeText(ctx, "Scan impossible : ${it.message}", Toast.LENGTH_LONG).show() }
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Scanner indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    var scanned by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(autoScan) { if (autoScan && !scanned) { scanned = true; scan() } }
+
     Scaffold(topBar = {
         TopAppBar(title = { Text("Ajouter un manuel") }, navigationIcon = {
             IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") }
@@ -272,7 +314,11 @@ fun SearchScreen(nav: NavController) {
                     )
                 }
             }
-            Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button({ scan() }) { Text("📷 Scanner") }
                 Button({ doSearch() }, enabled = product.isNotBlank() && !loading) { Text("Internet") }
                 OutlinedButton({
                     val u = WebSearch.googleUrl(product.trim(), lang)
