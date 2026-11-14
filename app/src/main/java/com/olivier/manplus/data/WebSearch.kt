@@ -22,15 +22,24 @@ object WebSearch {
 
     fun looksPdf(u: String) = u.lowercase().substringBefore('?').substringBefore('#').endsWith(".pdf")
 
-    suspend fun search(product: String): List<Result> = withContext(Dispatchers.IO) {
+    fun lang(code: String) = LANGS.find { it.code == code } ?: LANGS.first()
+
+    fun googleUrl(product: String, code: String): String {
+        val l = lang(code)
+        return "https://www.google.com/search?hl=${l.code}&lr=lang_${l.code}&q=" +
+            URLEncoder.encode("$product ${l.kw1} pdf", "UTF-8")
+    }
+
+    suspend fun search(product: String, code: String): List<Result> = withContext(Dispatchers.IO) {
+        val l = lang(code)
         val qs = listOf(
-            "$product manuel utilisateur filetype:pdf",
-            "$product user manual filetype:pdf",
-            "$product notice mode d'emploi"
+            "$product ${l.kw1} filetype:pdf",
+            "$product ${l.kw2} pdf",
+            "$product ${l.kw1}"
         )
         val all = coroutineScope {
-            val jobs = qs.map { q -> async { runCatching { bing(q) }.getOrDefault(emptyList()) } } +
-                async { runCatching { ddg("$product manuel pdf") }.getOrDefault(emptyList()) }
+            val jobs = qs.map { q -> async { runCatching { bing(q, l.code) }.getOrDefault(emptyList()) } } +
+                async { runCatching { ddg("$product ${l.kw1} pdf", l.ddg) }.getOrDefault(emptyList()) }
             jobs.awaitAll().flatten()
         }
         all.distinctBy { it.url.substringBefore('#') }
@@ -48,8 +57,8 @@ object WebSearch {
 
     private fun clean(s: String) = Html.fromHtml(s, Html.FROM_HTML_MODE_LEGACY).toString().trim()
 
-    private fun bing(q: String): List<Result> {
-        val xml = get("https://www.bing.com/search?format=rss&setlang=fr&q=" + URLEncoder.encode(q, "UTF-8"))
+    private fun bing(q: String, code: String): List<Result> {
+        val xml = get("https://www.bing.com/search?format=rss&setlang=$code&q=" + URLEncoder.encode(q, "UTF-8"))
         val out = mutableListOf<Result>()
         val p = Xml.newPullParser()
         p.setInput(StringReader(xml))
@@ -80,8 +89,8 @@ object WebSearch {
         return out
     }
 
-    private fun ddg(q: String): List<Result> {
-        val html = get("https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(q, "UTF-8"))
+    private fun ddg(q: String, kl: String): List<Result> {
+        val html = get("https://html.duckduckgo.com/html/?kl=$kl&q=" + URLEncoder.encode(q, "UTF-8"))
         val out = mutableListOf<Result>()
         val re = Regex("<a([^>]*class=\"result__a\"[^>]*)>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
         for (m in re.findAll(html)) {

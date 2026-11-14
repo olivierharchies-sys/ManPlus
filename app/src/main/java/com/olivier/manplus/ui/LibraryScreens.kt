@@ -7,12 +7,21 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -61,6 +70,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.olivier.manplus.ai.NanoEngine
+import com.olivier.manplus.data.LANGS
 import com.olivier.manplus.data.Manual
 import com.olivier.manplus.data.NotPdfException
 import com.olivier.manplus.data.Repo
@@ -68,7 +78,7 @@ import com.olivier.manplus.data.Settings
 import com.olivier.manplus.data.WebSearch
 import kotlinx.coroutines.launch
 
-fun NavController.openChat(id: String) = navigate("chat/$id") { popUpTo("library") }
+fun NavController.openChat(id: String) = navigate("chat/$id") { popUpTo("home") }
 
 @Composable
 fun BusyBar() {
@@ -81,6 +91,61 @@ fun BusyBar() {
     }
 }
 
+// ---------------- Accueil ----------------
+@Composable
+fun HomeScreen(nav: NavController) {
+    val list by Repo.manuals.collectAsState()
+    var q by rememberSaveable { mutableStateOf("") }
+    val clip = LocalClipboardManager.current
+    fun ask() {
+        val t = q.trim(); if (t.isEmpty()) return
+        q = ""
+        nav.navigate("chat/${Repo.ALL}?ask=${Uri.encode(t)}")
+    }
+    Scaffold(topBar = {
+        TopAppBar(title = { Text("ManPlus") }, actions = {
+            IconButton({ nav.navigate("settings") }) { Icon(Icons.Default.Settings, "Réglages") }
+        })
+    }) { pad ->
+        Column(
+            Modifier.padding(pad).consumeWindowInsets(pad).imePadding().fillMaxSize().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Assistant", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Question sur l'ensemble de tes ${list.size} manuels", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        q, { q = it }, Modifier.fillMaxWidth().padding(top = 8.dp),
+                        placeholder = { Text("Ta question… (ou colle un texte)") }, maxLines = 5,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { ask() }),
+                        trailingIcon = {
+                            TextButton({ clip.getText()?.text?.let { q = if (q.isBlank()) it else "$q $it" } }) { Text("Coller") }
+                        }
+                    )
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button({ ask() }, enabled = q.isNotBlank() && list.isNotEmpty()) {
+                            Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(18.dp)); Text("  Demander")
+                        }
+                        OutlinedButton({ nav.navigate("chat/${Repo.ALL}") }) { Text("Ouvrir le chat") }
+                    }
+                }
+            }
+            MenuTile("📚  Mes manuels (${list.size})") { nav.navigate("library") }
+            MenuTile("🔎  Rechercher / ajouter un manuel") { nav.navigate("search") }
+            MenuTile("⚙  Réglages") { nav.navigate("settings") }
+        }
+    }
+}
+
+@Composable
+private fun MenuTile(label: String, onClick: () -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Text(label, Modifier.padding(20.dp), style = MaterialTheme.typography.titleMedium)
+    }
+}
+
 // ---------------- Bibliothèque ----------------
 @Composable
 fun LibraryScreen(nav: NavController) {
@@ -88,8 +153,8 @@ fun LibraryScreen(nav: NavController) {
     var toDelete by remember { mutableStateOf<Manual?>(null) }
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("ManPlus") }, actions = {
-                IconButton({ nav.navigate("settings") }) { Icon(Icons.Default.Settings, "Réglages") }
+            TopAppBar(title = { Text("Mes manuels") }, navigationIcon = {
+                IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") }
             })
         },
         floatingActionButton = {
@@ -147,7 +212,9 @@ fun SearchScreen(nav: NavController) {
     var results by remember { mutableStateOf<List<WebSearch.Result>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<String?>(null) }
+    var lang by remember { mutableStateOf(Settings.lang) }
     val busy by Repo.busy.collectAsState()
+    val clip = LocalClipboardManager.current
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) scope.launch {
@@ -160,7 +227,7 @@ fun SearchScreen(nav: NavController) {
         if (product.isBlank() || loading) return
         loading = true; info = null
         scope.launch {
-            results = try { WebSearch.search(product.trim()) } catch (e: Exception) { emptyList() }
+            results = try { WebSearch.search(product.trim(), lang) } catch (e: Exception) { emptyList() }
             loading = false
             if (results.isEmpty()) info = "Aucun résultat. Essaie le navigateur intégré."
         }
@@ -188,13 +255,28 @@ fun SearchScreen(nav: NavController) {
                 product, { product = it }, Modifier.fillMaxWidth().padding(12.dp),
                 label = { Text("Nom / référence du produit") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { doSearch() })
+                keyboardActions = KeyboardActions(onSearch = { doSearch() }),
+                trailingIcon = {
+                    TextButton({ clip.getText()?.text?.let { product = it.trim().replace(Regex("\\s+"), " ") } }) { Text("Coller") }
+                }
             )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LANGS.forEach { l ->
+                    FilterChip(
+                        selected = lang == l.code,
+                        onClick = { lang = l.code; Settings.lang = l.code; if (results.isNotEmpty()) doSearch() },
+                        label = { Text(l.label) }
+                    )
+                }
+            }
             Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button({ doSearch() }, enabled = product.isNotBlank() && !loading) { Text("Internet") }
                 OutlinedButton({
-                    val q = Uri.encode("${product.trim()} manuel pdf")
-                    nav.navigate("browser?url=${Uri.encode("https://www.google.com/search?q=$q")}&p=${Uri.encode(product)}")
+                    val u = WebSearch.googleUrl(product.trim(), lang)
+                    nav.navigate("browser?url=${Uri.encode(u)}&p=${Uri.encode(product)}")
                 }, enabled = product.isNotBlank()) { Text("Navigateur") }
                 OutlinedButton({ picker.launch(arrayOf("application/pdf")) }) { Text("Téléphone") }
             }

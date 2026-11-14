@@ -36,23 +36,54 @@ data class Manual(
 
 data class Chunk(val page: Int, val text: String)
 
+/** Référence vers une page d'un manuel. */
+data class Ref(val id: String, val page: Int) {
+    fun toJson() = JSONObject().put("i", id).put("p", page)
+    companion object { fun from(o: JSONObject) = Ref(o.getString("i"), o.getInt("p")) }
+}
+
+data class Step(val text: String, val ref: Ref?)
+
 data class ChatMsg(
     val fromUser: Boolean, val text: String,
-    val pages: List<Int> = emptyList(), val query: String = "", val engine: String = ""
+    val refs: List<Ref> = emptyList(), val query: String = "", val engine: String = "",
+    val steps: List<Step> = emptyList()
 ) {
-    fun toJson() = JSONObject().put("u", fromUser).put("t", text)
-        .put("p", JSONArray(pages)).put("q", query).put("e", engine)
+    fun toJson(): JSONObject {
+        val r = JSONArray(); refs.forEach { r.put(it.toJson()) }
+        val s = JSONArray()
+        steps.forEach { st -> s.put(JSONObject().put("t", st.text).apply { st.ref?.let { put("r", it.toJson()) } }) }
+        return JSONObject().put("u", fromUser).put("t", text).put("r", r)
+            .put("q", query).put("e", engine).put("s", s)
+    }
 
     companion object {
-        fun from(o: JSONObject): ChatMsg {
-            val a = o.optJSONArray("p") ?: JSONArray()
-            return ChatMsg(
-                o.optBoolean("u"), o.optString("t"),
-                (0 until a.length()).map { a.getInt(it) }, o.optString("q"), o.optString("e")
-            )
+        fun from(o: JSONObject, defId: String): ChatMsg {
+            val refs = o.optJSONArray("r")?.let { a -> (0 until a.length()).map { Ref.from(a.getJSONObject(it)) } }
+                ?: o.optJSONArray("p")?.let { a ->
+                    if (defId == Repo.ALL) emptyList() else (0 until a.length()).map { Ref(defId, a.getInt(it)) }
+                } ?: emptyList()
+            val steps = o.optJSONArray("s")?.let { a ->
+                (0 until a.length()).map { i ->
+                    val so = a.getJSONObject(i)
+                    Step(so.optString("t"), so.optJSONObject("r")?.let { Ref.from(it) })
+                }
+            } ?: emptyList()
+            return ChatMsg(o.optBoolean("u"), o.optString("t"), refs, o.optString("q"), o.optString("e"), steps)
         }
     }
 }
+
+data class Lang(val code: String, val label: String, val kw1: String, val kw2: String, val ddg: String)
+
+val LANGS = listOf(
+    Lang("fr", "Français", "manuel utilisateur", "notice mode d'emploi", "fr-fr"),
+    Lang("en", "English", "user manual", "instruction manual", "us-en"),
+    Lang("nl", "Nederlands", "handleiding", "gebruiksaanwijzing", "nl-nl"),
+    Lang("de", "Deutsch", "Bedienungsanleitung", "Handbuch", "de-de"),
+    Lang("es", "Español", "manual de usuario", "instrucciones", "es-es"),
+    Lang("it", "Italiano", "manuale d'uso", "istruzioni", "it-it")
+)
 
 class NotPdfException : IOException("Le lien n'est pas un PDF")
 
@@ -67,10 +98,14 @@ object Settings {
     var model: String
         get() = p.getString("model", "gemini-2.5-flash") ?: "gemini-2.5-flash"
         set(v) = p.edit().putString("model", v.trim()).apply()
+    var lang: String
+        get() = p.getString("lang", "fr") ?: "fr"
+        set(v) = p.edit().putString("lang", v).apply()
 }
 
 object Repo {
-    const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
+    const val ALL = "ALL"
+    const val UA ="Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
 
     lateinit var ctx: Context
     private lateinit var root: File
@@ -243,13 +278,13 @@ object Repo {
         val f = File(dir(id), "chat.json")
         if (!f.exists()) emptyList() else {
             val a = JSONArray(f.readText())
-            (0 until a.length()).map { ChatMsg.from(a.getJSONObject(it)) }
+            (0 until a.length()).map { ChatMsg.from(a.getJSONObject(it), id) }
         }
     } catch (e: Exception) { emptyList() }
 
     fun saveChat(id: String, msgs: List<ChatMsg>) {
         val a = JSONArray(); msgs.forEach { a.put(it.toJson()) }
-        try { File(dir(id), "chat.json").writeText(a.toString()) } catch (_: Exception) {}
+        try { dir(id).mkdirs(); File(dir(id), "chat.json").writeText(a.toString()) } catch (_: Exception) {}
     }
 }
 

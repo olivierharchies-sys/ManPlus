@@ -1,9 +1,12 @@
 package com.olivier.manplus.ai
 
 import com.olivier.manplus.data.ChatMsg
+import com.olivier.manplus.data.Chunk
 import com.olivier.manplus.data.Manual
+import com.olivier.manplus.data.Ref
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.data.Settings
+import com.olivier.manplus.data.Step
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -12,11 +15,19 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** Extrait trouvé dans un manuel. */
+data class Src(val manual: Manual, val chunk: Chunk, val score: Double) {
+    val ref get() = Ref(manual.id, chunk.page)
+}
+
 object AnswerEngine {
 
-    suspend fun answer(m: Manual, q: String, history: List<ChatMsg>, onStatus: (String) -> Unit): ChatMsg {
-        val chunks = withContext(Dispatchers.IO) { Repo.chunks(m.id) }
-        if (chunks.isEmpty()) return ChatMsg(
+    /** [ms] = manuels interrogés (1 seul ou tous). */
+    suspend fun answer(ms: List<Manual>, q: String, history: List<ChatMsg>, onStatus: (String) -> Unit): ChatMsg {
+        if (ms.isEmpty()) return ChatMsg(false, "Aucun manuel importé. Ajoute d'abord un manuel.", query = q, engine = "—")
+        val multi = ms.size > 1
+        val hasText = withContext(Dispatchers.IO) { ms.any { Repo.chunks(it.id).isNotEmpty() } }
+        if (!hasText) return ChatMsg(
             false, "Ce PDF ne contient pas de texte exploitable (document scanné ?). Consulte le document directement.",
             query = q, engine = "—"
         )
@@ -30,12 +41,12 @@ object AnswerEngine {
             onStatus("Vérification de Gemini Nano…")
             val ready = try { NanoEngine.ensureReady(onStatus) } catch (e: Throwable) { false }
             if (ready) {
-                val hits = withContext(Dispatchers.Default) { Retriever.search(m.id, chunks, rq, 5) }
-                if (hits.isEmpty()) return notFound(q, "Gemini Nano")
+                val srcs = retrieve(ms, rq, 5)
+                if (srcs.isEmpty()) return notFound(q, "Gemini Nano")
                 onStatus("Gemini Nano rédige la réponse…")
                 try {
-                    val txt = NanoEngine.generate(prompt(m, q, hits, 650))
-                    if (txt.isNotBlank()) return build(txt, hits, q, "Gemini Nano")
+                    val txt = NanoEngine.generate(prompt(q, srcs, 600, multi))
+                    if (txt.isNotBlank()) return build(txt, srcs, q, "Gemini Nano", multi)
                 } catch (e: Throwable) {
                     if (mode == "NANO") return ChatMsg(false, "Erreur Gemini Nano : ${e.message}", query = q, engine = "Gemini Nano")
                 }
@@ -47,56 +58,100 @@ object AnswerEngine {
         // 2. Gemini cloud (clé gratuite AI Studio)
         val key = Settings.apiKey
         if ((mode == "AUTO" || mode == "CLOUD") && key.isNotBlank()) {
-            val hits = withContext(Dispatchers.Default) { Retriever.search(m.id, chunks, rq, 10) }
-            if (hits.isEmpty()) return notFound(q, "Gemini")
+            val srcs = retrieve(ms, rq, 10)
+            if (srcs.isEmpty()) return notFound(q, "Gemini")
             onStatus("Gemini (cloud) rédige la réponse…")
             return try {
-                val txt = withContext(Dispatchers.IO) { cloud(key, Settings.model, prompt(m, q, hits, 1500)) }
-                build(txt, hits, q, "Gemini cloud")
+                val txt = withContext(Dispatchers.IO) { cloud(key, Settings.model, prompt(q, srcs, 1500, multi)) }
+                build(txt, srcs, q, "Gemini cloud", multi)
             } catch (e: Exception) {
                 if (mode == "CLOUD") ChatMsg(false, "Erreur Gemini : ${e.message}", query = q, engine = "Gemini cloud")
-                else extract(rq, q, m, chunks.size)
+                else extract(ms, rq, q, multi)
             }
         } else if (mode == "CLOUD") {
             return ChatMsg(false, "Clé API Gemini manquante (Réglages).", query = q, engine = "—")
         }
 
         // 3. Extraits seuls
-        return extract(rq, q, m, chunks.size)
+        return extract(ms, rq, q, multi)
+    }
+
+    private suspend fun retrieve(ms: List<Manual>, q: String, k: Int): List<Src> = withContext(Dispatchers.Default) {
+        ms.flatMap { m -> Retriever.search(m.id, Repo.chunks(m.id), q, k).map { Src(m, it.chunk, it.score) } }
+            .sortedByDescending { it.score }.take(k)
     }
 
     private fun notFound(q: String, engine: String) =
-        ChatMsg(false, "Aucun passage du manuel ne correspond à cette question. Essaie d'autres mots-clés.", query = q, engine = engine)
+        ChatMsg(false, "Aucun passage des manuels ne correspond à cette question. Essaie d'autres mots-clés.", query = q, engine = engine)
 
-    private suspend fun extract(rq: String, q: String, m: Manual, n: Int): ChatMsg {
-        val hits = withContext(Dispatchers.Default) { Retriever.search(m.id, Repo.chunks(m.id), rq, 3) }
-        if (hits.isEmpty()) return notFound(q, "Extraits")
+    private fun label(s: Src, multi: Boolean) =
+        if (multi) "${s.manual.product} p. ${s.chunk.page}" else "p. ${s.chunk.page}"
+
+    private suspend fun extract(ms: List<Manual>, rq: String, q: String, multi: Boolean): ChatMsg {
+        val srcs = retrieve(ms, rq, 3)
+        if (srcs.isEmpty()) return notFound(q, "Extraits")
         val txt = buildString {
-            append("Passages les plus pertinents du manuel :\n")
-            hits.forEach { h -> append("\n[p. ${h.chunk.page}] ").append(h.chunk.text.take(500).trim()).append("…\n") }
+            append("Passages les plus pertinents :\n")
+            srcs.forEach { s -> append("\n[${label(s, multi)}] ").append(s.chunk.text.take(500).trim()).append("…\n") }
         }
-        return ChatMsg(false, txt, hits.map { it.chunk.page }.distinct(), q, "Extraits")
+        return ChatMsg(false, txt, srcs.map { it.ref }.distinct(), q, "Extraits")
     }
 
-    private fun prompt(m: Manual, q: String, hits: List<Hit>, maxPerChunk: Int) = buildString {
+    private fun prompt(q: String, srcs: List<Src>, maxPerChunk: Int, multi: Boolean) = buildString {
         append("Tu es un assistant technique. Réponds en français, de façon claire et concise, ")
-        append("UNIQUEMENT à partir des extraits du manuel « ${m.product} » ci-dessous. ")
-        append("Indique la page source entre crochets, par exemple [p. 12]. ")
-        append("Si la réponse n'est pas dans les extraits, réponds : « Information non trouvée dans le manuel. »\n\n")
+        append("UNIQUEMENT à partir des extraits de manuels ci-dessous.\n")
+        append("Cite la source de chaque information avec son repère entre crochets, par exemple [S2].\n")
+        append("Si la question demande une procédure (comment faire, installer, régler, nettoyer, réparer, programmer…), ")
+        append("réponds UNIQUEMENT par des étapes numérotées, une étape courte par ligne, au format :\n")
+        append("1. action [S1]\n2. action [S3]\n")
+        append("Sinon, réponds en quelques phrases.\n")
+        append("Si l'information n'est pas dans les extraits, réponds : « Information non trouvée dans le manuel. »\n\n")
         append("EXTRAITS :\n")
-        hits.sortedBy { it.chunk.page }.forEach { h ->
-            append("[p. ${h.chunk.page}] ").append(h.chunk.text.take(maxPerChunk)).append("\n---\n")
+        srcs.forEachIndexed { i, s ->
+            append("[S${i + 1}] (")
+            if (multi) append(s.manual.product).append(", ")
+            append("p. ${s.chunk.page}) ").append(s.chunk.text.take(maxPerChunk)).append("\n---\n")
         }
         append("\nQUESTION : ").append(q).append("\nRÉPONSE :")
     }
 
-    private fun build(raw: String, hits: List<Hit>, q: String, engine: String): ChatMsg {
-        val txt = raw.replace("**", "").trim()
-        val cited = Regex("""\[\s*p(?:age|\.)?\s*(\d{1,4})""", RegexOption.IGNORE_CASE)
-            .findAll(txt).mapNotNull { it.groupValues[1].toIntOrNull() }.toList()
-        val hitPages = hits.map { it.chunk.page }
-        val pages = (cited.filter { it in hitPages } + hitPages).distinct().take(5)
-        return ChatMsg(false, txt, pages, q, engine)
+    private val bracket = Regex("""\[([^\]\n]{1,40})]""")
+    private val sTag = Regex("""S\s*(\d{1,2})""", RegexOption.IGNORE_CASE)
+    private val stepLine = Regex("""^\s*(?:[ée]tape\s*)?(\d{1,2})\s*[.):\-–]\s+(.+)$""", RegexOption.IGNORE_CASE)
+
+    /** Sources citées dans un texte, dans l'ordre. */
+    private fun cited(t: String, srcs: List<Src>): List<Src> =
+        bracket.findAll(t).flatMap { b -> sTag.findAll(b.groupValues[1]) }
+            .mapNotNull { it.groupValues[1].toIntOrNull()?.let { n -> srcs.getOrNull(n - 1) } }.toList()
+
+    /** Remplace [S1] par [p. 12] (ou [Produit p. 12]). */
+    private fun readable(t: String, srcs: List<Src>, multi: Boolean): String =
+        bracket.replace(t) { b ->
+            val list = sTag.findAll(b.groupValues[1])
+                .mapNotNull { it.groupValues[1].toIntOrNull()?.let { n -> srcs.getOrNull(n - 1) } }
+                .map { label(it, multi) }.distinct().toList()
+            if (list.isEmpty()) b.value else "[" + list.joinToString(", ") + "]"
+        }
+
+    private fun build(raw: String, srcs: List<Src>, q: String, engine: String, multi: Boolean): ChatMsg {
+        val clean = raw.replace("**", "").replace("__", "").trim()
+        val refs = (cited(clean, srcs) + srcs).map { it.ref }.distinct().take(6)
+
+        val steps = clean.lines().mapNotNull { line ->
+            stepLine.find(line)?.let { m ->
+                val body = m.groupValues[2].trim()
+                val src = cited(body, srcs).firstOrNull()
+                Step(readable(body, srcs, multi), src?.ref)
+            }
+        }
+        // étape sans référence → reprend la référence précédente (ou la meilleure source)
+        var last: Ref? = srcs.firstOrNull()?.ref
+        val filled = steps.map { s -> (s.ref ?: last).also { last = it }.let { Step(s.text, it) } }
+
+        return ChatMsg(
+            false, readable(clean, srcs, multi), refs, q, engine,
+            if (filled.size >= 2) filled else emptyList()
+        )
     }
 
     private fun cloud(key: String, model: String, prompt: String): String {

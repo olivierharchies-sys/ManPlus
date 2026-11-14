@@ -19,6 +19,7 @@ import androidx.navigation.navArgument
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.ui.BrowserScreen
 import com.olivier.manplus.ui.ChatScreen
+import com.olivier.manplus.ui.HomeScreen
 import com.olivier.manplus.ui.LibraryScreen
 import com.olivier.manplus.ui.SearchScreen
 import com.olivier.manplus.ui.SettingsScreen
@@ -39,7 +40,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppNav() {
     val nav = rememberNavController()
-    NavHost(nav, startDestination = "library") {
+    NavHost(nav, startDestination = "home") {
+        composable("home") { HomeScreen(nav) }
         composable("library") { LibraryScreen(nav) }
         composable("search") { SearchScreen(nav) }
         composable("settings") { SettingsScreen(nav) }
@@ -50,7 +52,10 @@ fun AppNav() {
                 navArgument("p") { type = NavType.StringType; defaultValue = "" }
             )
         ) { BrowserScreen(nav, it.arguments?.getString("url").orEmpty(), it.arguments?.getString("p").orEmpty()) }
-        composable("chat/{id}") { ChatScreen(nav, it.arguments?.getString("id").orEmpty()) }
+        composable(
+            "chat/{id}?ask={ask}",
+            arguments = listOf(navArgument("ask") { type = NavType.StringType; defaultValue = "" })
+        ) { ChatScreen(nav, it.arguments?.getString("id").orEmpty(), it.arguments?.getString("ask").orEmpty()) }
         composable(
             "viewer/{id}?page={page}&q={q}",
             arguments = listOf(
