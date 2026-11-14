@@ -19,9 +19,8 @@ import androidx.navigation.navArgument
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.ui.BrowserScreen
 import com.olivier.manplus.ui.ChatScreen
-import com.olivier.manplus.ui.HomeScreen
+import com.olivier.manplus.ui.MainTabs
 import com.olivier.manplus.ui.LibraryScreen
-import com.olivier.manplus.ui.SearchScreen
 import com.olivier.manplus.ui.SettingsScreen
 import com.olivier.manplus.ui.ViewerScreen
 
@@ -41,23 +40,22 @@ class MainActivity : ComponentActivity() {
 fun AppNav() {
     val nav = rememberNavController()
     NavHost(nav, startDestination = "home") {
-        composable("home") { HomeScreen(nav) }
+        composable("home") { MainTabs(nav) }
         composable("library") { LibraryScreen(nav) }
-        composable(
-            "search?scan={scan}&med={med}",
-            arguments = listOf(
-                navArgument("scan") { type = NavType.BoolType; defaultValue = false },
-                navArgument("med") { type = NavType.BoolType; defaultValue = false }
-            )
-        ) { SearchScreen(nav, it.arguments?.getBoolean("scan") ?: false, it.arguments?.getBoolean("med") ?: false) }
         composable("settings") { SettingsScreen(nav) }
         composable(
-            "browser?url={url}&p={p}",
+            "browser?url={url}&p={p}&d={d}",
             arguments = listOf(
                 navArgument("url") { type = NavType.StringType; defaultValue = "" },
-                navArgument("p") { type = NavType.StringType; defaultValue = "" }
+                navArgument("p") { type = NavType.StringType; defaultValue = "" },
+                navArgument("d") { type = NavType.StringType; defaultValue = "manual" }
             )
-        ) { BrowserScreen(nav, it.arguments?.getString("url").orEmpty(), it.arguments?.getString("p").orEmpty()) }
+        ) {
+            BrowserScreen(
+                nav, it.arguments?.getString("url").orEmpty(), it.arguments?.getString("p").orEmpty(),
+                it.arguments?.getString("d") ?: "manual"
+            )
+        }
         composable(
             "chat/{id}?ask={ask}",
             arguments = listOf(navArgument("ask") { type = NavType.StringType; defaultValue = "" })
