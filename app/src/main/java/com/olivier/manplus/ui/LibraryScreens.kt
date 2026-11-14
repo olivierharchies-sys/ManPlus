@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -72,6 +73,8 @@ import androidx.navigation.NavController
 import com.olivier.manplus.ai.NanoEngine
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.olivier.manplus.data.CUSTOM_TYPE
+import com.olivier.manplus.data.DOC_TYPES
 import com.olivier.manplus.data.LANGS
 import com.olivier.manplus.data.Manual
 import com.olivier.manplus.data.NotPdfException
@@ -136,6 +139,7 @@ fun HomeScreen(nav: NavController) {
             }
             MenuTile("📚  Mes manuels (${list.size})") { nav.navigate("library") }
             MenuTile("🔎  Rechercher / ajouter un manuel") { nav.navigate("search") }
+            MenuTile("💊  Notice de médicament") { nav.navigate("search?med=true") }
             MenuTile("📷  Scanner QR code / code-barres") { nav.navigate("search?scan=true") }
             MenuTile("⚙  Réglages") { nav.navigate("settings") }
         }
@@ -208,7 +212,7 @@ fun LibraryScreen(nav: NavController) {
 
 // ---------------- Recherche ----------------
 @Composable
-fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
+fun SearchScreen(nav: NavController, autoScan: Boolean = false, startMedicine: Boolean = false) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var product by rememberSaveable { mutableStateOf("") }
@@ -216,6 +220,10 @@ fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
     var loading by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<String?>(null) }
     var lang by remember { mutableStateOf(Settings.lang) }
+    var med by rememberSaveable { mutableStateOf(startMedicine) }
+    var typeId by rememberSaveable { mutableStateOf(if (startMedicine) "leaflet" else "manual") }
+    var customType by rememberSaveable { mutableStateOf("") }
+    var showAll by rememberSaveable { mutableStateOf(false) }
     val busy by Repo.busy.collectAsState()
     val clip = LocalClipboardManager.current
 
@@ -230,9 +238,15 @@ fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
         if (product.isBlank() || loading) return
         loading = true; info = null
         scope.launch {
-            results = try { WebSearch.search(product.trim(), lang) } catch (e: Exception) { emptyList() }
+            val custom = if (typeId == CUSTOM_TYPE) customType.trim() else ""
+            val type = DOC_TYPES.find { it.id == typeId && it.medicine == med }
+            results = try { WebSearch.search(product.trim(), lang, type, custom, med) } catch (e: Exception) { emptyList() }
             loading = false
-            if (results.isEmpty()) info = "Aucun résultat. Essaie le navigateur intégré."
+            info = when {
+                results.isEmpty() -> "Aucun résultat. Essaie le navigateur intégré."
+                results.none { it.coherent } -> "Tous les résultats semblent incohérents avec « ${product.trim()} » : coche « Afficher les résultats incohérents » pour les voir."
+                else -> null
+            }
         }
     }
 
@@ -288,20 +302,60 @@ fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
     LaunchedEffect(autoScan) { if (autoScan && !scanned) { scanned = true; scan() } }
 
     Scaffold(topBar = {
-        TopAppBar(title = { Text("Ajouter un manuel") }, navigationIcon = {
+        TopAppBar(title = { Text(if (med) "Notice de médicament" else "Ajouter un manuel") }, navigationIcon = {
             IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour") }
         })
     }) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             OutlinedTextField(
                 product, { product = it }, Modifier.fillMaxWidth().padding(12.dp),
-                label = { Text("Nom / référence du produit") }, singleLine = true,
+                label = { Text(if (med) "Nom du médicament (ex. Dafalgan 1 g)" else "Nom / référence du produit") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { doSearch() }),
                 trailingIcon = {
                     TextButton({ clip.getText()?.text?.let { product = it.trim().replace(Regex("\\s+"), " ") } }) { Text("Coller") }
                 }
             )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilterChip(
+                    selected = !med,
+                    onClick = { if (med) { med = false; typeId = "manual"; results = emptyList(); info = null } },
+                    label = { Text("📦 Produit") }
+                )
+                FilterChip(
+                    selected = med,
+                    onClick = { if (!med) { med = true; typeId = "leaflet"; results = emptyList(); info = null } },
+                    label = { Text("💊 Médicament") }
+                )
+            }
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                DOC_TYPES.filter { it.medicine == med }.forEach { t ->
+                    FilterChip(
+                        selected = typeId == t.id,
+                        onClick = { typeId = t.id; if (results.isNotEmpty()) doSearch() },
+                        label = { Text(t.label) }
+                    )
+                }
+                FilterChip(
+                    selected = typeId == CUSTOM_TYPE,
+                    onClick = { typeId = CUSTOM_TYPE },
+                    label = { Text("Autre…") }
+                )
+            }
+            if (typeId == CUSTOM_TYPE) {
+                OutlinedTextField(
+                    customType, { customType = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    label = { Text("Type de document (ex. schéma de câblage)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { doSearch() })
+                )
+            }
             Row(
                 Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -321,7 +375,11 @@ fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
                 Button({ scan() }) { Text("📷 Scanner") }
                 Button({ doSearch() }, enabled = product.isNotBlank() && !loading) { Text("Internet") }
                 OutlinedButton({
-                    val u = WebSearch.googleUrl(product.trim(), lang)
+                    val u = WebSearch.googleUrl(
+                        product.trim(), lang,
+                        DOC_TYPES.find { it.id == typeId && it.medicine == med },
+                        if (typeId == CUSTOM_TYPE) customType else "", med
+                    )
                     nav.navigate("browser?url=${Uri.encode(u)}&p=${Uri.encode(product)}")
                 }, enabled = product.isNotBlank()) { Text("Navigateur") }
                 OutlinedButton({ picker.launch(arrayOf("application/pdf")) }) { Text("Téléphone") }
@@ -330,11 +388,31 @@ fun SearchScreen(nav: NavController, autoScan: Boolean = false) {
             BusyBar()
             if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(12.dp))
             info?.let { Text(it, Modifier.padding(12.dp)) }
+            if (med) Text(
+                "Une notice ne remplace pas l'avis d'un médecin ou d'un pharmacien.",
+                Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall
+            )
+            val hidden = results.count { !it.coherent }
+            if (hidden > 0) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { showAll = !showAll }.padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(showAll, { showAll = it })
+                    Text("Afficher les résultats incohérents ($hidden)", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            val shown = if (showAll) results else results.filter { it.coherent }
             LazyColumn(Modifier.weight(1f)) {
-                items(results) { r ->
+                items(shown) { r ->
                     ListItem(
                         modifier = Modifier.clickable { open(r) },
-                        overlineContent = { Text((if (r.isPdf) "PDF · " else "Page · ") + r.domain) },
+                        overlineContent = {
+                            Text(
+                                (if (!r.coherent) "⚠ incohérent · " else if (r.trusted) "✔ officiel · " else "") +
+                                    (if (r.isPdf) "PDF · " else "Page · ") + r.domain
+                            )
+                        },
                         headlineContent = { Text(r.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         supportingContent = if (r.snippet.isBlank()) null else {
                             { Text(r.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis) }

@@ -44,9 +44,12 @@ fun AppNav() {
         composable("home") { HomeScreen(nav) }
         composable("library") { LibraryScreen(nav) }
         composable(
-            "search?scan={scan}",
-            arguments = listOf(navArgument("scan") { type = NavType.BoolType; defaultValue = false })
-        ) { SearchScreen(nav, it.arguments?.getBoolean("scan") ?: false) }
+            "search?scan={scan}&med={med}",
+            arguments = listOf(
+                navArgument("scan") { type = NavType.BoolType; defaultValue = false },
+                navArgument("med") { type = NavType.BoolType; defaultValue = false }
+            )
+        ) { SearchScreen(nav, it.arguments?.getBoolean("scan") ?: false, it.arguments?.getBoolean("med") ?: false) }
         composable("settings") { SettingsScreen(nav) }
         composable(
             "browser?url={url}&p={p}",
