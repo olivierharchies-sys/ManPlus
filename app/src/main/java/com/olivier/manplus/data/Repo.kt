@@ -85,6 +85,52 @@ val LANGS = listOf(
     Lang("it", "Italiano", "manuale d'uso", "istruzioni", "it-it")
 )
 
+/**
+ * Type de document recherché. [kw] = mots-clés par code de langue (repli : "en").
+ * [id] "custom" = texte libre saisi par la personne.
+ */
+data class DocType(val id: String, val label: String, val medicine: Boolean, val kw: Map<String, String>) {
+    fun keyword(code: String): String = kw[code] ?: kw["en"] ?: ""
+}
+
+val DOC_TYPES = listOf(
+    DocType("manual", "Manuel / notice", false, emptyMap()), // utilise Lang.kw1 / kw2
+    DocType("quick", "Guide rapide", false, mapOf(
+        "fr" to "guide de démarrage rapide", "en" to "quick start guide", "nl" to "snelstartgids",
+        "de" to "Kurzanleitung", "es" to "guía de inicio rápido", "it" to "guida rapida")),
+    DocType("install", "Installation / montage", false, mapOf(
+        "fr" to "guide d'installation", "en" to "installation guide", "nl" to "installatiehandleiding",
+        "de" to "Installationsanleitung", "es" to "guía de instalación", "it" to "guida all'installazione")),
+    DocType("datasheet", "Fiche technique", false, mapOf(
+        "fr" to "fiche technique", "en" to "datasheet", "nl" to "technische fiche",
+        "de" to "Datenblatt", "es" to "ficha técnica", "it" to "scheda tecnica")),
+    DocType("service", "Réparation / service", false, mapOf(
+        "fr" to "manuel de réparation", "en" to "service manual", "nl" to "servicehandleiding",
+        "de" to "Servicehandbuch", "es" to "manual de servicio", "it" to "manuale di servizio")),
+    DocType("parts", "Pièces détachées", false, mapOf(
+        "fr" to "pièces détachées schéma", "en" to "parts diagram", "nl" to "onderdelentekening",
+        "de" to "Explosionszeichnung", "es" to "despiece", "it" to "esploso")),
+    DocType("warranty", "Garantie", false, mapOf(
+        "fr" to "garantie", "en" to "warranty", "nl" to "garantie",
+        "de" to "Garantie", "es" to "garantía", "it" to "garanzia")),
+    DocType("safety", "Fiche de sécurité", false, mapOf(
+        "fr" to "fiche de données de sécurité", "en" to "safety data sheet", "nl" to "veiligheidsinformatieblad",
+        "de" to "Sicherheitsdatenblatt", "es" to "hoja de datos de seguridad", "it" to "scheda di sicurezza")),
+    DocType("catalog", "Catalogue / brochure", false, mapOf(
+        "fr" to "catalogue brochure", "en" to "catalog brochure", "nl" to "catalogus brochure",
+        "de" to "Katalog Prospekt", "es" to "catálogo folleto", "it" to "catalogo brochure")),
+    // --- médicaments ---
+    DocType("leaflet", "Notice patient", true, mapOf(
+        "fr" to "notice patient", "en" to "package leaflet", "nl" to "bijsluiter",
+        "de" to "Packungsbeilage", "es" to "prospecto", "it" to "foglio illustrativo")),
+    DocType("smpc", "RCP (professionnels)", true, mapOf(
+        "fr" to "résumé des caractéristiques du produit", "en" to "summary of product characteristics",
+        "nl" to "samenvatting van de productkenmerken", "de" to "Fachinformation",
+        "es" to "ficha técnica", "it" to "riassunto delle caratteristiche del prodotto"))
+)
+
+const val CUSTOM_TYPE = "custom"
+
 class NotPdfException : IOException("Le lien n'est pas un PDF")
 
 object Settings {

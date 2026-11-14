@@ -14,10 +14,16 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.text.Normalizer
 
 object WebSearch {
-    data class Result(val title: String, val url: String, val snippet: String) {
-        val isPdf get() = looksPdf(url)
+    data class Result(
+        val title: String, val url: String, val snippet: String,
+        val forcePdf: Boolean = false,
+        val coherent: Boolean = true,
+        val trusted: Boolean = false
+    ) {
+        val isPdf get() = forcePdf || looksPdf(url)
         val domain get() = runCatching { URL(url).host.removePrefix("www.") }.getOrDefault("")
     }
 
@@ -25,27 +31,122 @@ object WebSearch {
 
     fun lang(code: String) = LANGS.find { it.code == code } ?: LANGS.first()
 
-    fun googleUrl(product: String, code: String): String {
+    /** Sources officielles pour les médicaments (par langue) ; "all" s'applique à toutes. */
+    private val MED_SITES = mapOf(
+        "all" to listOf("ema.europa.eu"),
+        "fr" to listOf("base-donnees-publique.medicaments.gouv.fr", "ansm.sante.fr", "pharmainfo.be", "vidal.fr"),
+        "nl" to listOf("pharmainfo.be", "geneesmiddeleninformatiebank.nl", "cbip.be"),
+        "en" to listOf("dailymed.nlm.nih.gov", "medicines.org.uk", "mhra.gov.uk", "pharmainfo.be"),
+        "de" to listOf("pharmnet-bund.de", "gelbe-liste.de", "swissmedicinfo.ch"),
+        "es" to listOf("cima.aemps.es"),
+        "it" to listOf("farmaci.agenziafarmaco.gov.it")
+    )
+    private val ALL_MED_SITES = MED_SITES.values.flatten().toSet()
+
+    private fun medSites(code: String) = ((MED_SITES[code] ?: emptyList()) + MED_SITES.getValue("all")).distinct()
+
+    /** Mots-clés (principal, secondaire) selon le type choisi ou le texte libre. */
+    fun keywords(code: String, type: DocType?, custom: String): Pair<String, String> {
         val l = lang(code)
-        return "https://www.google.com/search?hl=${l.code}&lr=lang_${l.code}&q=" +
-            URLEncoder.encode("$product ${l.kw1} pdf", "UTF-8")
+        val c = custom.trim()
+        return when {
+            c.isNotEmpty() -> c to c
+            type == null || type.id == "manual" -> l.kw1 to l.kw2
+            else -> type.keyword(code).let { it to it }
+        }
     }
 
-    suspend fun search(product: String, code: String): List<Result> = withContext(Dispatchers.IO) {
+    fun googleUrl(subject: String, code: String, type: DocType?, custom: String, medicine: Boolean): String {
         val l = lang(code)
-        val qs = listOf(
-            "$product ${l.kw1} filetype:pdf",
-            "$product ${l.kw2} pdf",
-            "$product ${l.kw1}"
-        )
+        val k = keywords(code, type, custom).first
+        val q = if (medicine) "$subject $k" else "$subject $k pdf"
+        return "https://www.google.com/search?hl=${l.code}&lr=lang_${l.code}&q=" + URLEncoder.encode(q, "UTF-8")
+    }
+
+    suspend fun search(
+        subject: String, code: String,
+        type: DocType? = null, custom: String = "", medicine: Boolean = false
+    ): List<Result> = withContext(Dispatchers.IO) {
+        val l = lang(code)
+        val (k1, k2) = keywords(code, type, custom)
+        val qs = mutableListOf<String>()
+        qs += "$subject $k1 filetype:pdf"
+        qs += if (k2 != k1) "$subject $k2 pdf" else "$subject $k1 pdf"
+        qs += "$subject $k1"
+        if (medicine) {
+            val sites = medSites(code).take(5).joinToString(" OR ") { "site:$it" }
+            qs += "$subject $k1 ($sites)"
+        }
         val all = coroutineScope {
             val jobs = qs.map { q -> async { runCatching { bing(q, l.code) }.getOrDefault(emptyList()) } } +
-                async { runCatching { ddg("$product ${l.kw1} pdf", l.ddg) }.getOrDefault(emptyList()) }
+                async { runCatching { ddg("$subject $k1" + if (medicine) "" else " pdf", l.ddg) }.getOrDefault(emptyList()) } +
+                async { if (medicine && code == "en") runCatching { dailyMed(subject) }.getOrDefault(emptyList()) else emptyList() }
             jobs.awaitAll().flatten()
         }
+        val tokens = tokens(subject, medicine)
+        val joined = squash(subject)
         all.distinctBy { it.url.substringBefore('#') }
-            .sortedByDescending { it.isPdf }
-            .take(40)
+            .map { r ->
+                r.copy(
+                    coherent = isCoherent(r, tokens, joined, medicine),
+                    trusted = medicine && ALL_MED_SITES.any { d -> r.domain == d || r.domain.endsWith(".$d") }
+                )
+            }
+            .sortedWith(
+                compareByDescending<Result> { it.coherent }
+                    .thenByDescending { it.trusted }
+                    .thenByDescending { it.isPdf }
+            )
+            .take(60)
+    }
+
+    // ---------- cohérence des résultats ----------
+    private val STOP = setOf("de", "du", "des", "la", "le", "les", "et", "pour", "the", "for", "and", "of", "a", "un", "une")
+    private val UNITS = setOf(
+        "mg", "g", "kg", "ml", "mcg", "ug", "µg", "ui", "iu", "cp", "comprime", "comprimes", "tablet", "tablets",
+        "gelule", "gelules", "capsule", "capsules", "sirop", "solution", "sachet", "sachets", "gel", "creme", "pommade"
+    )
+
+    private fun norm(s: String): String =
+        Normalizer.normalize(s.lowercase(), Normalizer.Form.NFD).replace(Regex("\\p{Mn}+"), "")
+
+    private fun squash(s: String) = norm(s).replace(Regex("[^a-z0-9]"), "")
+
+    private fun tokens(subject: String, medicine: Boolean): List<String> =
+        norm(subject).split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 2 && it !in STOP }
+            .filter { !medicine || (it !in UNITS && !it.any { c -> c.isDigit() }) }
+            .distinct()
+
+    private fun hit(t: String, hay: String, squashed: String): Boolean =
+        if (t.length < 3) Regex("(^|[^a-z0-9])" + Regex.escape(t) + "($|[^a-z0-9])").containsMatchIn(hay)
+        else hay.contains(t) || squashed.contains(t)
+
+    private fun isCoherent(r: Result, tokens: List<String>, joined: String, medicine: Boolean): Boolean {
+        if (tokens.isEmpty()) return true
+        val decodedUrl = runCatching { URLDecoder.decode(r.url, "UTF-8") }.getOrDefault(r.url)
+        val hay = norm(r.title + " " + decodedUrl + " " + r.snippet)
+        val sq = hay.replace(Regex("[^a-z0-9]"), "")
+        if (joined.length >= 4 && sq.contains(joined)) return true
+        val hits = tokens.count { hit(it, hay, sq) }
+        val enough = if (tokens.size <= 2) hits == tokens.size else hits * 10 >= tokens.size * 6
+        return enough && (!medicine || hit(tokens.first(), hay, sq))
+    }
+
+    /** Notices américaines (FDA) via l'API publique DailyMed. */
+    private fun dailyMed(name: String): List<Result> {
+        val j = JSONObject(get("https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?pagesize=10&drug_name=" +
+            URLEncoder.encode(name, "UTF-8")))
+        val a = j.optJSONArray("data") ?: return emptyList()
+        return (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("setid"); if (id.isBlank()) return@mapNotNull null
+            Result(
+                o.optString("title").trim().ifBlank { name },
+                "https://dailymed.nlm.nih.gov/dailymed/downloadpdffile.cfm?setId=$id",
+                "DailyMed (FDA)", forcePdf = true
+            )
+        }
     }
 
     /** Nom du produit à partir d'un EAN/UPC (Open Products Facts, puis UPCitemdb gratuit). */
