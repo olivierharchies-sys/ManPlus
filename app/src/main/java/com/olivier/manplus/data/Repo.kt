@@ -167,7 +167,9 @@ object Settings {
         get() = p.getString("key", "") ?: ""
         set(v) = p.edit().putString("key", v.trim()).apply()
     var model: String
-        get() = p.getString("model", "gemini-2.5-flash") ?: "gemini-2.5-flash"
+        // gemini-2.5-flash n'est plus accessible aux nouveaux utilisateurs (HTTP 404) : on bascule sur l'alias « latest »
+        get() = (p.getString("model", null) ?: "").ifBlank { "gemini-flash-latest" }
+            .let { if (it == "gemini-2.5-flash") "gemini-flash-latest" else it }
         set(v) = p.edit().putString("model", v.trim()).apply()
     var lang: String
         get() = p.getString("lang", "fr") ?: "fr"

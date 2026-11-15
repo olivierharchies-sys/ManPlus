@@ -9,6 +9,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
@@ -161,10 +162,11 @@ fun PhotoSearchDialog(medicine: Boolean, onDismiss: () -> Unit, onResult: (label
                     }
                 }
                 if (photos.isNotEmpty()) Text("Touche une photo pour la retirer.", style = MaterialTheme.typography.bodySmall)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton({ shoot() }, enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy) { Text("📸 Photo") }
-                    OutlinedButton({ gallery() }, enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy) { Text("🖼 Galerie") }
-                    OutlinedButton({ scan() }, enabled = codes.size < 3 && !busy) { Text("🔳 QR / code") }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val pad = PaddingValues(horizontal = 4.dp)
+                    OutlinedButton({ shoot() }, Modifier.weight(1f), enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy, contentPadding = pad) { Text("📸 Photo", maxLines = 1) }
+                    OutlinedButton({ gallery() }, Modifier.weight(1f), enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy, contentPadding = pad) { Text("🖼 Galerie", maxLines = 1) }
+                    OutlinedButton({ scan() }, Modifier.weight(1f), enabled = codes.size < 3 && !busy, contentPadding = pad) { Text("🔳 QR", maxLines = 1) }
                 }
                 if (codes.isNotEmpty()) Row(
                     Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)
