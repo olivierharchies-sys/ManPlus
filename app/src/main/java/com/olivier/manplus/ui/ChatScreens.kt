@@ -119,6 +119,7 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
     var finding by rememberSaveable(id) { mutableStateOf(domainTab && docs.isEmpty()) }
     var status by remember { mutableStateOf<String?>(null) }
     var stepsOf by remember { mutableStateOf<ChatMsg?>(null) }
+    var showPhotos by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val list = rememberLazyListState()
@@ -141,13 +142,14 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
                 }
                 val custom = (if (medicine) Settings.customMed else Settings.customMan).trim()
                 val res = WebSearch.search(
-                    query, Settings.lang, type, custom, medicine, Settings.format
+                    query, Settings.lang, type, custom, medicine,
+                    if (medicine) Settings.formatMed else Settings.formatMan
                 )
                 val hits = res.map { ChatHit(it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted) }
                 val hidden = hits.count { !it.coherent }
                 ChatMsg(
                     false,
-                    if (hits.isEmpty()) "Aucun document trouvé pour « $query ». Essaie un autre nom, une autre langue ou un autre format (Accueil)."
+                    if (hits.isEmpty()) "Aucun document trouvé pour « $query ». Essaie un autre nom, une autre langue (Accueil) ou un autre format / type de document (⚙ en haut de l'onglet)."
                     else "${hits.size - hidden} résultat(s) pour « $query ». Touche-en un pour l'ajouter." +
                         if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "",
                     query = query, hits = hits
@@ -253,6 +255,7 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
 
     Column(modifier.imePadding().fillMaxSize()) {
         BusyBar()
+        if (domainTab) DomainPrefs(medicine)
         if (domainTab) Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
@@ -312,10 +315,17 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
                 }
             )
             if (domainTab) TextButton({ scan() }) { Text("📷") }
+            if (domainTab) TextButton({ showPhotos = true }) { Text("🖼") }
             IconButton({ send() }, enabled = status == null && input.isNotBlank()) {
                 Icon(Icons.AutoMirrored.Filled.Send, "Envoyer")
             }
         }
+    }
+
+    if (showPhotos) PhotoSearchDialog(medicine, onDismiss = { showPhotos = false }) { label, query ->
+        showPhotos = false
+        finding = true
+        find(label, query)
     }
 
     stepsOf?.let { msg ->
