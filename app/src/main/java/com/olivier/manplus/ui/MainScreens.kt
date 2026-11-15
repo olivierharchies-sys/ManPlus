@@ -80,71 +80,74 @@ fun MainTabs(nav: NavController) {
     }
 }
 
-/** Préférences de recherche (langue, format, type de document), réglées depuis l'accueil. */
+/** Accueil : seule la langue de recherche se règle ici. */
 @Composable
 private fun SearchPrefs() {
-    var open by rememberSaveable { mutableStateOf(false) }
     var lang by remember { mutableStateOf(Settings.lang) }
-    var format by remember { mutableStateOf(Settings.format) }
-    var typeMan by remember { mutableStateOf(Settings.typeMan) }
-    var typeMed by remember { mutableStateOf(Settings.typeMed) }
-    var customMan by remember { mutableStateOf(Settings.customMan) }
-    var customMed by remember { mutableStateOf(Settings.customMed) }
-
-    fun typeLabel(id: String, custom: String, med: Boolean) =
-        if (id == CUSTOM_TYPE) custom.ifBlank { "Autre" }
-        else DOC_TYPES.find { it.id == id && it.medicine == med }?.label ?: "—"
-
-    val formatLabel = mapOf("pdf" to "PDF", "doc" to "Word", "all" to "Tous formats")
-
     Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                Modifier.fillMaxWidth().clickable { open = !open },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Text("🔎 Langue de recherche", fontWeight = FontWeight.Bold)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                LANGS.forEach { l ->
+                    FilterChip(lang == l.code, { lang = l.code; Settings.lang = l.code }, { Text(l.label) })
+                }
+            }
+        }
+    }
+}
+
+/** Onglets Médicament / Manuel : format de fichier et type de document propres à l'onglet. */
+@Composable
+fun DomainPrefs(medicine: Boolean) {
+    var open by rememberSaveable(medicine) { mutableStateOf(false) }
+    var format by remember(medicine) { mutableStateOf(if (medicine) Settings.formatMed else Settings.formatMan) }
+    var type by remember(medicine) { mutableStateOf(if (medicine) Settings.typeMed else Settings.typeMan) }
+    var custom by remember(medicine) { mutableStateOf(if (medicine) Settings.customMed else Settings.customMan) }
+
+    val formatLabel = mapOf("pdf" to "PDF", "doc" to "Word", "all" to "Tous formats")
+    val typeLabel =
+        if (type == CUSTOM_TYPE) custom.ifBlank { "Autre" }
+        else DOC_TYPES.find { it.id == type && it.medicine == medicine }?.label ?: "—"
+
+    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "🔎 ${LANGS.find { it.code == lang }?.label ?: lang} · ${formatLabel[format]} · " +
-                        "manuel : ${typeLabel(typeMan, customMan, false)} · " +
-                        "médicament : ${typeLabel(typeMed, customMed, true)}",
+                    "⚙ ${formatLabel[format]} · $typeLabel",
                     Modifier.weight(1f), style = MaterialTheme.typography.bodySmall
                 )
                 Text(if (open) "▲" else "▼")
             }
             if (open) {
-                Text("Langue", fontWeight = FontWeight.Bold)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    LANGS.forEach { l ->
-                        FilterChip(lang == l.code, { lang = l.code; Settings.lang = l.code }, { Text(l.label) })
-                    }
-                }
                 Text("Format du fichier", fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     formatLabel.forEach { (k, v) ->
-                        FilterChip(format == k, { format = k; Settings.format = k }, { Text(v) })
+                        FilterChip(format == k, {
+                            format = k
+                            if (medicine) Settings.formatMed = k else Settings.formatMan = k
+                        }, { Text(v) })
                     }
                 }
-                Text("Type de document – manuel", fontWeight = FontWeight.Bold)
+                Text("Type de document", fontWeight = FontWeight.Bold)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    DOC_TYPES.filter { !it.medicine }.forEach { t ->
-                        FilterChip(typeMan == t.id, { typeMan = t.id; Settings.typeMan = t.id }, { Text(t.label) })
+                    DOC_TYPES.filter { it.medicine == medicine }.forEach { t ->
+                        FilterChip(type == t.id, {
+                            type = t.id
+                            if (medicine) Settings.typeMed = t.id else Settings.typeMan = t.id
+                        }, { Text(t.label) })
                     }
-                    FilterChip(typeMan == CUSTOM_TYPE, { typeMan = CUSTOM_TYPE; Settings.typeMan = CUSTOM_TYPE }, { Text("Autre…") })
+                    FilterChip(type == CUSTOM_TYPE, {
+                        type = CUSTOM_TYPE
+                        if (medicine) Settings.typeMed = CUSTOM_TYPE else Settings.typeMan = CUSTOM_TYPE
+                    }, { Text("Autre…") })
                 }
-                if (typeMan == CUSTOM_TYPE) OutlinedTextField(
-                    customMan, { customMan = it; Settings.customMan = it }, Modifier.fillMaxWidth(),
-                    label = { Text("Type de document (ex. schéma de câblage)") }, singleLine = true
-                )
-                Text("Type de document – médicament", fontWeight = FontWeight.Bold)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    DOC_TYPES.filter { it.medicine }.forEach { t ->
-                        FilterChip(typeMed == t.id, { typeMed = t.id; Settings.typeMed = t.id }, { Text(t.label) })
-                    }
-                    FilterChip(typeMed == CUSTOM_TYPE, { typeMed = CUSTOM_TYPE; Settings.typeMed = CUSTOM_TYPE }, { Text("Autre…") })
-                }
-                if (typeMed == CUSTOM_TYPE) OutlinedTextField(
-                    customMed, { customMed = it; Settings.customMed = it }, Modifier.fillMaxWidth(),
-                    label = { Text("Type de document (ex. posologie enfant)") }, singleLine = true
+                if (type == CUSTOM_TYPE) OutlinedTextField(
+                    custom, {
+                        custom = it
+                        if (medicine) Settings.customMed = it else Settings.customMan = it
+                    }, Modifier.fillMaxWidth(),
+                    label = { Text(if (medicine) "Type de document (ex. posologie enfant)" else "Type de document (ex. schéma de câblage)") },
+                    singleLine = true
                 )
             }
         }

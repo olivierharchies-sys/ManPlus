@@ -1,6 +1,10 @@
 package com.olivier.manplus.data
 
+import android.content.ContentValues
 import android.content.Context
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -168,10 +172,14 @@ object Settings {
     var lang: String
         get() = p.getString("lang", "fr") ?: "fr"
         set(v) = p.edit().putString("lang", v).apply()
-    /** Format de fichier cherché : pdf, doc ou all. */
-    var format: String
-        get() = p.getString("format", "pdf") ?: "pdf"
-        set(v) = p.edit().putString("format", v).apply()
+    /** Format de fichier cherché (onglet Manuel) : pdf, doc ou all. Ancienne clé « format » reprise par défaut. */
+    var formatMan: String
+        get() = p.getString("formatMan", p.getString("format", "pdf")) ?: "pdf"
+        set(v) = p.edit().putString("formatMan", v).apply()
+    /** Format de fichier cherché (onglet Médicament). */
+    var formatMed: String
+        get() = p.getString("formatMed", p.getString("format", "pdf")) ?: "pdf"
+        set(v) = p.edit().putString("formatMed", v).apply()
     var typeMan: String
         get() = p.getString("typeMan", "manual") ?: "manual"
         set(v) = p.edit().putString("typeMan", v).apply()
@@ -342,6 +350,7 @@ object Repo {
             val m = Manual(id, product.trim(), title, source, n, chunks.size, System.currentTimeMillis(), domain)
             manuals.value = listOf(m) + manuals.value
             saveIndex()
+            exportCopy(id, product)
             return id
         } catch (e: Exception) {
             dir(id).deleteRecursively()
@@ -349,6 +358,34 @@ object Repo {
         } finally {
             busy.value = null
         }
+    }
+
+    // ---------- copie dans Documents/ManPlus ----------
+    const val PUBLIC_DIR = "ManPlus"
+
+    /**
+     * Copie le PDF dans le dossier public Documents/ManPlus (visible depuis les Fichiers).
+     * Échec silencieux : la copie interne de l'appli reste la référence.
+     */
+    private fun exportCopy(id: String, product: String) {
+        try {
+            val name = product.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ").trim().take(80)
+                .ifBlank { "Document" } + ".pdf"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val v = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/" + PUBLIC_DIR)
+                }
+                val uri = ctx.contentResolver.insert(MediaStore.Files.getContentUri("external"), v) ?: return
+                ctx.contentResolver.openOutputStream(uri)?.use { o -> pdf(id).inputStream().use { it.copyTo(o) } }
+            } else {
+                // Android 8-9 : écriture directe (nécessite l'autorisation de stockage, sinon ignoré)
+                val d = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), PUBLIC_DIR)
+                d.mkdirs()
+                pdf(id).copyTo(File(d, name), overwrite = true)
+            }
+        } catch (_: Exception) {}
     }
 
     // ---------- chunks ----------
