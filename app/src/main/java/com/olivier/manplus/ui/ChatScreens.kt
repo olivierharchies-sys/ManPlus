@@ -263,6 +263,8 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
             FilterChip(finding, { finding = true }, { Text("🔎 Trouver un document") })
             FilterChip(!finding, { finding = false }, { Text("💬 Question") })
             Spacer(Modifier.weight(1f))
+            IconButton({ scan() }) { Text("🔳") }
+            IconButton({ showPhotos = true }) { Text("📸") }
             if (msgs.isNotEmpty()) IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) {
                 Icon(Icons.Default.Delete, "Effacer")
             }
@@ -314,8 +316,6 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
                     TextButton({ clip.getText()?.text?.let { input = if (input.isBlank()) it else "$input $it" } }) { Text("Coller") }
                 }
             )
-            if (domainTab) TextButton({ scan() }) { Text("📷") }
-            if (domainTab) TextButton({ showPhotos = true }) { Text("🖼") }
             IconButton({ send() }, enabled = status == null && input.isNotBlank()) {
                 Icon(Icons.AutoMirrored.Filled.Send, "Envoyer")
             }
