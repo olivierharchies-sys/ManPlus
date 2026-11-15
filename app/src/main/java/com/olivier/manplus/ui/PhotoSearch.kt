@@ -82,7 +82,7 @@ fun PhotoSearchDialog(medicine: Boolean, onDismiss: () -> Unit, onResult: (label
     fun shoot() {
         try {
             val dir = File(ctx.cacheDir, "photos").apply { mkdirs() }
-            val f = File.createTempFile("p", ".jpg", dir)
+            val f = File.createTempFile("photo_", ".jpg", dir)
             val u = FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f)
             camUri = u
             camera.launch(u)
@@ -161,10 +161,10 @@ fun PhotoSearchDialog(medicine: Boolean, onDismiss: () -> Unit, onResult: (label
                     }
                 }
                 if (photos.isNotEmpty()) Text("Touche une photo pour la retirer.", style = MaterialTheme.typography.bodySmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedButton({ shoot() }, enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy) { Text("📸 Photo") }
                     OutlinedButton({ gallery() }, enabled = photos.size < VisionSearch.MAX_PHOTOS && !busy) { Text("🖼 Galerie") }
-                    OutlinedButton({ scan() }, enabled = codes.size < 3 && !busy) { Text("▮▮ Code") }
+                    OutlinedButton({ scan() }, enabled = codes.size < 3 && !busy) { Text("🔳 QR / code") }
                 }
                 if (codes.isNotEmpty()) Row(
                     Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)
