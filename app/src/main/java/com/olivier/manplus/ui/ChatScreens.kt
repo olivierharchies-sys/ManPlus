@@ -260,15 +260,21 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
         ) {
-            FilterChip(finding, { finding = true }, { Text("🔎 Trouver un document") })
+            FilterChip(finding, { finding = true }, { Text("🔎 Trouver") })
             FilterChip(!finding, { finding = false }, { Text("💬 Question") })
             Spacer(Modifier.weight(1f))
-            IconButton({ scan() }) { Text("🔳") }
-            IconButton({ showPhotos = true }) { Text("📸") }
             if (msgs.isNotEmpty()) IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) {
                 Icon(Icons.Default.Delete, "Effacer")
             }
-        } else if (msgs.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            }
+        if (domainTab) Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            AssistChip({ scan() }, { Text("🔳 Scanner QR / code") })
+            AssistChip({ showPhotos = true }, { Text("📸 Photos") })
+        }
+        if (!domainTab && msgs.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) { Icon(Icons.Default.Delete, "Effacer") }
         }
         LazyColumn(
