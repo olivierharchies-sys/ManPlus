@@ -67,6 +67,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.navigation.NavController
 import com.olivier.manplus.ai.AnswerEngine
 import com.olivier.manplus.data.ChatMsg
+import com.olivier.manplus.data.LinkChecker
 import com.olivier.manplus.data.Ref
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.data.WebSearch
@@ -145,13 +146,27 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
                     query, Settings.lang, type, custom, medicine,
                     if (medicine) Settings.formatMed else Settings.formatMan
                 )
-                val hits = res.map { ChatHit(it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted) }
+                // Vérification des liens : on ne contrôle que les meilleurs résultats (les autres restent « non vérifiés »).
+                status = "Vérification des liens…"
+                val toCheck = res.filter { it.coherent }.take(30).map { it.url }
+                val checks = LinkChecker.checkAll(toCheck)
+                val dead = checks.count { it.value.state == LinkChecker.State.DEAD }
+                val hits = res
+                    .filter { checks[it.url]?.state != LinkChecker.State.DEAD }
+                    .map {
+                        val c = checks[it.url]
+                        ChatHit(
+                            it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted,
+                            it.score, c?.state == LinkChecker.State.OK, c?.modified ?: 0L
+                        )
+                    }
                 val hidden = hits.count { !it.coherent }
                 ChatMsg(
                     false,
                     if (hits.isEmpty()) "Aucun document trouvé pour « $query ». Essaie un autre nom, une autre langue (Accueil) ou un autre format / type de document (⚙ en haut de l'onglet)."
                     else "${hits.size - hidden} résultat(s) pour « $query ». Touche-en un pour l'ajouter." +
-                        if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "",
+                        (if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "") +
+                        (if (dead > 0) " $dead lien(s) inaccessible(s) écarté(s)." else ""),
                     query = query, hits = hits
                 )
             } catch (e: Exception) {
@@ -363,7 +378,10 @@ private fun Bubble(
                         Column(Modifier.fillMaxWidth().clickable { onHit(h) }.padding(vertical = 6.dp)) {
                             Text(
                                 (if (!h.coherent) "⚠ incohérent · " else if (h.trusted) "✔ officiel · " else "") +
-                                    (if (h.pdf) "PDF · " else if (h.doc) "Word · " else "Page · ") + h.domain,
+                                    (if (h.pdf) "PDF · " else if (h.doc) "Word · " else "Page · ") + h.domain +
+                                    (if (h.score > 0) " · ${h.score} %" else "") +
+                                    (if (h.verified) " · 🔗 vérifié" else "") +
+                                    (if (h.modified > 0) " · màj " + hitDate(h.modified) else ""),
                                 style = MaterialTheme.typography.labelSmall
                             )
                             Text(
@@ -475,3 +493,7 @@ fun BrowserScreen(nav: NavController, startUrl: String, product: String, domain:
         }
     }
 }
+
+/** Date de mise à jour d'un document (mois/année) à partir de l'en-tête Last-Modified. */
+private fun hitDate(ms: Long): String =
+    java.text.SimpleDateFormat("MM/yyyy", java.util.Locale.getDefault()).format(java.util.Date(ms))

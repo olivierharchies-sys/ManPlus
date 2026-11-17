@@ -42,8 +42,9 @@ object Retriever {
 
     fun search(id: String, chunks: List<Chunk>, query: String, k: Int): List<Hit> {
         if (chunks.isEmpty()) return emptyList()
-        val q = tokens(query).distinct()
         val ix = index(id, chunks)
+        // Tolérance aux fautes de frappe : un mot absent du document est remplacé par le mot le plus proche du document.
+        val q = tokens(query).distinct().map { fix(it, ix.df) }.distinct()
         val n = chunks.size.toDouble()
         val k1 = 1.4; val b = 0.75
         val scored = chunks.indices.map { i ->
@@ -63,6 +64,38 @@ object Retriever {
         }
         val best = scored.filter { it.score > 0 }.sortedByDescending { it.score }.take(k)
         return best
+    }
+
+    /** Remplace [t] par le mot du vocabulaire le plus proche (1 faute max, 2 pour les longs mots) ; sinon [t]. */
+    private fun fix(t: String, vocab: Map<String, Int>): String {
+        if (t.length < 4 || vocab.containsKey(t)) return t
+        val maxD = if (t.length >= 8) 2 else 1
+        var best = t
+        var bestD = maxD + 1
+        var bestDf = 0
+        for ((w, df) in vocab) {
+            if (kotlin.math.abs(w.length - t.length) > maxD || w[0] != t[0]) continue
+            val d = distance(t, w, maxD)
+            if (d < bestD || (d == bestD && df > bestDf)) { best = w; bestD = d; bestDf = df }
+        }
+        return if (bestD <= maxD) best else t
+    }
+
+    /** Distance de Levenshtein, abandonnée dès qu'elle dépasse [limit] (renvoie alors limit + 1). */
+    private fun distance(a: String, b: String, limit: Int): Int {
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1)
+            cur[0] = i
+            var rowMin = cur[0]
+            for (j in 1..b.length) {
+                cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+                if (cur[j] < rowMin) rowMin = cur[j]
+            }
+            if (rowMin > limit) return limit + 1
+            prev = cur
+        }
+        return prev[b.length]
     }
 
     fun bestOnPage(id: String, chunks: List<Chunk>, page: Int, query: String): Chunk? {

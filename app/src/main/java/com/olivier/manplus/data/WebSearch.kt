@@ -21,7 +21,9 @@ object WebSearch {
         val title: String, val url: String, val snippet: String,
         val forcePdf: Boolean = false,
         val coherent: Boolean = true,
-        val trusted: Boolean = false
+        val trusted: Boolean = false,
+        /** Indice de confiance 0-100 (cohérence, source officielle, format, recoupement des moteurs). */
+        val score: Int = 0
     ) {
         val isPdf get() = forcePdf || looksPdf(url)
         val isDoc get() = looksDoc(url)
@@ -97,6 +99,8 @@ object WebSearch {
         }
         val tokens = tokens(subject, medicine)
         val joined = squash(subject)
+        // Nombre de moteurs / requêtes qui ont renvoyé la même adresse : un recoupement renforce la confiance.
+        val copies = all.groupingBy { it.url.substringBefore('#') }.eachCount()
         all.distinctBy { it.url.substringBefore('#') }
             .map { r ->
                 r.copy(
@@ -104,12 +108,32 @@ object WebSearch {
                     trusted = medicine && ALL_MED_SITES.any { d -> r.domain == d || r.domain.endsWith(".$d") }
                 )
             }
+            .map { r -> r.copy(score = scoreOf(r, tokens, joined, format, k1, copies[r.url.substringBefore('#')] ?: 1)) }
             .sortedWith(
                 compareByDescending<Result> { it.coherent }
+                    .thenByDescending { it.score }
                     .thenByDescending { it.trusted }
-                    .thenByDescending { if (format == "doc") it.isDoc else if (format == "pdf") it.isPdf else false }
             )
             .take(60)
+    }
+
+    /** Indice de confiance 0-100 : plus il est élevé, plus le résultat correspond au produit et au document voulus. */
+    private fun scoreOf(r: Result, tokens: List<String>, joined: String, format: String, kw: String, copies: Int): Int {
+        val decodedUrl = runCatching { URLDecoder.decode(r.url, "UTF-8") }.getOrDefault(r.url)
+        val hay = norm(r.title + " " + decodedUrl + " " + r.snippet)
+        val sq = hay.replace(Regex("[^a-z0-9]"), "")
+        var s = 0.0
+        if (tokens.isEmpty()) s += 30 else {
+            s += 45.0 * tokens.count { hit(it, hay, sq) } / tokens.size
+            if (joined.length >= 4 && sq.contains(joined)) s += 10
+        }
+        if (r.coherent) s += 10
+        if (r.trusted) s += 20
+        if ((format == "pdf" && r.isPdf) || (format == "doc" && r.isDoc)) s += 10
+        val words = norm(kw).split(Regex("[^a-z0-9]+")).filter { it.length >= 4 }
+        if (words.any { hay.contains(it) }) s += 5
+        s += minOf(10, (copies - 1) * 5)
+        return s.toInt().coerceIn(0, 100)
     }
 
     // ---------- cohérence des résultats ----------
