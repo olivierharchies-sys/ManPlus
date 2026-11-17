@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -101,6 +102,8 @@ fun BusyBar() {
 fun LibraryScreen(nav: NavController) {
     val list by Repo.manuals.collectAsState()
     var toDelete by remember { mutableStateOf<Manual?>(null) }
+    var favs by remember { mutableStateOf(Settings.favorites) }
+    val sorted = remember(list, favs) { list.sortedByDescending { it.id in favs } }
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("Mes documents") }, navigationIcon = {
@@ -117,7 +120,7 @@ fun LibraryScreen(nav: NavController) {
                 )
             }
             LazyColumn(contentPadding = PaddingValues(12.dp, 8.dp, 12.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(list, key = { it.id }) { m ->
+                items(sorted, key = { it.id }) { m ->
                     Card(Modifier.fillMaxWidth().clickable { nav.navigate("chat/${m.id}") }) {
                         Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
@@ -127,6 +130,16 @@ fun LibraryScreen(nav: NavController) {
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
                                 if (m.chunks == 0) Text("⚠ Pas de texte (PDF scanné)", style = MaterialTheme.typography.bodySmall)
+                            }
+                            IconButton({
+                                favs = if (m.id in favs) favs - m.id else favs + m.id
+                                Settings.favorites = favs
+                            }) {
+                                Icon(
+                                    Icons.Default.Star, if (m.id in favs) "Retirer des favoris" else "Ajouter aux favoris",
+                                    tint = if (m.id in favs) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                )
                             }
                             IconButton({ nav.navigate("viewer/${m.id}") }) { Icon(Icons.AutoMirrored.Filled.List, "Document") }
                             IconButton({ toDelete = m }) { Icon(Icons.Default.Delete, "Supprimer") }

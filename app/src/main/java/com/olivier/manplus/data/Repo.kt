@@ -53,15 +53,23 @@ data class Step(val text: String, val ref: Ref?)
 /** Résultat de recherche internet affiché dans un chat. */
 data class ChatHit(
     val title: String, val url: String, val domain: String,
-    val pdf: Boolean, val doc: Boolean, val coherent: Boolean, val trusted: Boolean
+    val pdf: Boolean, val doc: Boolean, val coherent: Boolean, val trusted: Boolean,
+    /** Indice de confiance 0-100 (0 = non calculé). */
+    val score: Int = 0,
+    /** Le lien a répondu lors de la vérification. */
+    val verified: Boolean = false,
+    /** Date de dernière modification annoncée par le serveur (ms), 0 si inconnue. */
+    val modified: Long = 0L
 ) {
     fun toJson() = JSONObject().put("t", title).put("u", url).put("d", domain)
         .put("p", pdf).put("w", doc).put("c", coherent).put("o", trusted)
+        .put("k", score).put("v", verified).put("m", modified)
 
     companion object {
         fun from(o: JSONObject) = ChatHit(
             o.optString("t"), o.optString("u"), o.optString("d"),
-            o.optBoolean("p"), o.optBoolean("w"), o.optBoolean("c", true), o.optBoolean("o")
+            o.optBoolean("p"), o.optBoolean("w"), o.optBoolean("c", true), o.optBoolean("o"),
+            o.optInt("k"), o.optBoolean("v"), o.optLong("m")
         )
     }
 }
@@ -194,6 +202,26 @@ object Settings {
     var customMed: String
         get() = p.getString("customMed", "") ?: ""
         set(v) = p.edit().putString("customMed", v).apply()
+
+    /** Documents favoris (identifiants), affichés en tête de la bibliothèque. */
+    var favorites: Set<String>
+        get() = (p.getString("favorites", "") ?: "").split(',').filter { it.isNotBlank() }.toSet()
+        set(v) = p.edit().putString("favorites", v.joinToString(",")).apply()
+
+    private fun histKey(medicine: Boolean) = if (medicine) "histMed" else "histMan"
+
+    /** Dernières recherches de documents (10 max, la plus récente d'abord), par onglet. */
+    fun history(medicine: Boolean): List<String> =
+        (p.getString(histKey(medicine), "") ?: "").split('\n').filter { it.isNotBlank() }
+
+    fun addHistory(medicine: Boolean, query: String) {
+        val q = query.replace(Regex("\\s+"), " ").trim()
+        if (q.isEmpty() || q.length > 80) return
+        val l = (listOf(q) + history(medicine)).distinctBy { it.lowercase() }.take(10)
+        p.edit().putString(histKey(medicine), l.joinToString("\n")).apply()
+    }
+
+    fun clearHistory(medicine: Boolean) = p.edit().remove(histKey(medicine)).apply()
 }
 
 object Repo {
@@ -407,6 +435,19 @@ object Repo {
         }
         synchronized(chunkCache) { chunkCache[id] = list }
         return list
+    }
+
+    // ---------- notes personnelles ----------
+    fun note(id: String): String = try {
+        val f = File(dir(id), "note.txt")
+        if (f.exists()) f.readText() else ""
+    } catch (e: Exception) { "" }
+
+    fun saveNote(id: String, text: String) {
+        try {
+            val f = File(dir(id), "note.txt")
+            if (text.isBlank()) f.delete() else { dir(id).mkdirs(); f.writeText(text) }
+        } catch (_: Exception) {}
     }
 
     // ---------- chat ----------

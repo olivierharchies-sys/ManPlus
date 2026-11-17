@@ -67,6 +67,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.navigation.NavController
 import com.olivier.manplus.ai.AnswerEngine
 import com.olivier.manplus.data.ChatMsg
+import com.olivier.manplus.data.LinkChecker
 import com.olivier.manplus.data.Ref
 import com.olivier.manplus.data.Repo
 import com.olivier.manplus.data.WebSearch
@@ -125,6 +126,7 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
     val list = rememberLazyListState()
     val clip = LocalClipboardManager.current
     val domain = if (medicine) Repo.D_MED else Repo.D_MAN
+    var history by remember(medicine) { mutableStateOf(Settings.history(medicine)) }
 
     LaunchedEffect(msgs.size, status) { if (msgs.isNotEmpty()) list.animateScrollToItem(msgs.size - 1) }
 
@@ -134,6 +136,7 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
     fun find(label: String, query: String) {
         if (status != null) return
         post(ChatMsg(true, label))
+        Settings.addHistory(medicine, query); history = Settings.history(medicine)
         status = "Recherche sur internet…"
         scope.launch {
             val reply = try {
@@ -145,13 +148,27 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
                     query, Settings.lang, type, custom, medicine,
                     if (medicine) Settings.formatMed else Settings.formatMan
                 )
-                val hits = res.map { ChatHit(it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted) }
+                // Vérification des liens : on ne contrôle que les meilleurs résultats (les autres restent « non vérifiés »).
+                status = "Vérification des liens…"
+                val toCheck = res.filter { it.coherent }.take(30).map { it.url }
+                val checks = LinkChecker.checkAll(toCheck)
+                val dead = checks.count { it.value.state == LinkChecker.State.DEAD }
+                val hits = res
+                    .filter { checks[it.url]?.state != LinkChecker.State.DEAD }
+                    .map {
+                        val c = checks[it.url]
+                        ChatHit(
+                            it.title, it.url, it.domain, it.isPdf, it.isDoc, it.coherent, it.trusted,
+                            it.score, c?.state == LinkChecker.State.OK, c?.modified ?: 0L
+                        )
+                    }
                 val hidden = hits.count { !it.coherent }
                 ChatMsg(
                     false,
                     if (hits.isEmpty()) "Aucun document trouvé pour « $query ». Essaie un autre nom, une autre langue (Accueil) ou un autre format / type de document (⚙ en haut de l'onglet)."
                     else "${hits.size - hidden} résultat(s) pour « $query ». Touche-en un pour l'ajouter." +
-                        if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "",
+                        (if (hidden > 0) " $hidden résultat(s) incohérent(s) masqué(s)." else "") +
+                        (if (dead > 0) " $dead lien(s) inaccessible(s) écarté(s)." else ""),
                     query = query, hits = hits
                 )
             } catch (e: Exception) {
@@ -277,6 +294,13 @@ fun ChatBody(nav: NavController, id: String, modifier: Modifier = Modifier, ask:
         if (!domainTab && msgs.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             IconButton({ msgs.clear(); Repo.saveChat(id, emptyList()) }) { Icon(Icons.Default.Delete, "Effacer") }
         }
+        if (domainTab && finding && input.isBlank() && history.isNotEmpty()) Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
+        ) {
+            history.forEach { h -> AssistChip({ find(h, h) }, { Text("🕘 " + h.take(24)) }) }
+            TextButton({ Settings.clearHistory(medicine); history = emptyList() }) { Text("Effacer") }
+        }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(), state = list,
             contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -363,7 +387,10 @@ private fun Bubble(
                         Column(Modifier.fillMaxWidth().clickable { onHit(h) }.padding(vertical = 6.dp)) {
                             Text(
                                 (if (!h.coherent) "⚠ incohérent · " else if (h.trusted) "✔ officiel · " else "") +
-                                    (if (h.pdf) "PDF · " else if (h.doc) "Word · " else "Page · ") + h.domain,
+                                    (if (h.pdf) "PDF · " else if (h.doc) "Word · " else "Page · ") + h.domain +
+                                    (if (h.score > 0) " · ${h.score} %" else "") +
+                                    (if (h.verified) " · 🔗 vérifié" else "") +
+                                    (if (h.modified > 0) " · màj " + hitDate(h.modified) else ""),
                                 style = MaterialTheme.typography.labelSmall
                             )
                             Text(
@@ -475,3 +502,7 @@ fun BrowserScreen(nav: NavController, startUrl: String, product: String, domain:
         }
     }
 }
+
+/** Date de mise à jour d'un document (mois/année) à partir de l'en-tête Last-Modified. */
+private fun hitDate(ms: Long): String =
+    java.text.SimpleDateFormat("MM/yyyy", java.util.Locale.getDefault()).format(java.util.Date(ms))
