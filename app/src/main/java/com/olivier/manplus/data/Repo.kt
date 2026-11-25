@@ -175,7 +175,8 @@ val FILE_FORMATS = listOf(
     FileFormat("xls", "Excel", listOf("xlsx", "xls")),
     FileFormat("ppt", "PowerPoint", listOf("pptx", "ppt")),
     FileFormat("txt", "Texte", listOf("txt")),
-    FileFormat("cbz", "BD (CBZ / CBR)", listOf("cbz", "cbr"))
+    FileFormat("cbz", "BD (CBZ / CBR)", listOf("cbz", "cbr")),
+    FileFormat("zip", "ZIP", listOf("zip"))
 )
 
 const val CUSTOM_FORMAT = "custom"
