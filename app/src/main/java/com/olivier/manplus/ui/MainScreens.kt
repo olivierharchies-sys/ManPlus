@@ -58,7 +58,7 @@ fun MainTabs(nav: NavController) {
         },
         bottomBar = {
             NavigationBar {
-                listOf("🏠" to "Accueil", "💊" to "Médicament", "📘" to "Manuel").forEachIndexed { i, (icon, label) ->
+                listOf("🏠" to "Accueil", "💊" to "Médicament", "📘" to "Manuel", "📁" to "Fichiers").forEachIndexed { i, (icon, label) ->
                     NavigationBarItem(
                         selected = tab == i, onClick = { tab = i },
                         icon = { Text(icon) }, label = { Text(label) }
@@ -74,7 +74,8 @@ fun MainTabs(nav: NavController) {
                     ChatBody(nav, Repo.ALL, Modifier.weight(1f))
                 }
                 1 -> ChatBody(nav, Repo.MED, Modifier.weight(1f))
-                else -> ChatBody(nav, Repo.MAN, Modifier.weight(1f))
+                2 -> ChatBody(nav, Repo.MAN, Modifier.weight(1f))
+                else -> FileSearchTab()
             }
         }
     }
