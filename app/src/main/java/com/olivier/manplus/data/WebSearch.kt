@@ -23,7 +23,9 @@ object WebSearch {
         val coherent: Boolean = true,
         val trusted: Boolean = false,
         /** Indice de confiance 0-100 (cohérence, source officielle, format, recoupement des moteurs). */
-        val score: Int = 0
+        val score: Int = 0,
+        /** Extension connue d'avance (sources à API : l'adresse seule ne la montre pas toujours). */
+        val fileExt: String = ""
     ) {
         val isPdf get() = forcePdf || looksPdf(url)
         val isDoc get() = looksDoc(url)
@@ -38,6 +40,67 @@ object WebSearch {
     }
 
     fun lang(code: String) = LANGS.find { it.code == code } ?: LANGS.first()
+
+    /** Extension (minuscules, sans point) du fichier désigné par une adresse, ou "" s'il n'y en a pas. */
+    fun extOf(u: String): String {
+        val last = u.lowercase().substringBefore('?').substringBefore('#').substringAfterLast('/')
+        return if ('.' in last) last.substringAfterLast('.') else ""
+    }
+
+    /** Résultat de la recherche de fichiers : [direct] = l'adresse pointe vraiment vers un fichier de ce format. */
+    data class FileResult(val result: Result, val ext: String, val direct: Boolean, val score: Int)
+
+    /**
+     * Recherche de fichiers par titre et par format ([exts] = extensions acceptées, ex. ["doc", "docx"]).
+     * Les fichiers directs passent avant les pages web qui en parlent.
+     */
+    suspend fun searchFiles(title: String, exts: List<String>, code: String): List<FileResult> =
+        withContext(Dispatchers.IO) {
+            val l = lang(code)
+            val t = title.replace(Regex("\\s+"), " ").trim()
+            val filter = if (exts.size == 1) "filetype:${exts[0]}"
+            else exts.joinToString(" OR ", "(", ")") { "filetype:$it" }
+            val qs = listOf("$t $filter", "\"$t\" $filter", "$t ${exts.first()}", "$t $filter site:archive.org")
+            val all = coroutineScope {
+                // Tous les moteurs et catalogues en parallèle ; une source en panne est simplement ignorée.
+                val jobs = qs.map { q -> async { runCatching { bing(q, l.code) }.getOrDefault(emptyList()) } } +
+                    async { runCatching { bing("$t $filter", l.code, first = 11) }.getOrDefault(emptyList()) } +
+                    async { runCatching { bing("$t $filter", l.code, first = 21) }.getOrDefault(emptyList()) } +
+                    async { runCatching { ddg("$t $filter", l.ddg) }.getOrDefault(emptyList()) } +
+                    async { runCatching { ddg("$t ${exts.first()}", l.ddg) }.getOrDefault(emptyList()) } +
+                    async { runCatching { mojeek("$t $filter") }.getOrDefault(emptyList()) } +
+                    async { runCatching { mojeek("$t ${exts.first()}") }.getOrDefault(emptyList()) } +
+                    async { runCatching { archiveOrg(t, exts) }.getOrDefault(emptyList()) } +
+                    async { runCatching { gutendex(t, exts) }.getOrDefault(emptyList()) } +
+                    async { runCatching { commons(t, exts) }.getOrDefault(emptyList()) } +
+                    async { if ("pdf" in exts) runCatching { arxiv(t) }.getOrDefault(emptyList()) else emptyList() }
+                jobs.awaitAll().flatten()
+            }
+            val tokens = tokens(t, false)
+            val joined = squash(t)
+            val copies = all.groupingBy { it.url.substringBefore('#') }.eachCount()
+            all.distinctBy { it.url.substringBefore('#') }
+                .map { r ->
+                    val coherent = isCoherent(r, tokens, joined, false)
+                    val ext = r.fileExt.takeIf { it in exts } ?: extOf(r.url).takeIf { it in exts } ?: ""
+                    val decoded = runCatching { URLDecoder.decode(r.url, "UTF-8") }.getOrDefault(r.url)
+                    val hay = norm(r.title + " " + decoded + " " + r.snippet)
+                    val sq = hay.replace(Regex("[^a-z0-9]"), "")
+                    var s = 0.0
+                    s += if (tokens.isEmpty()) 30.0 else 50.0 * tokens.count { hit(it, hay, sq) } / tokens.size
+                    if (joined.length >= 4 && sq.contains(joined)) s += 10
+                    if (ext.isNotEmpty()) s += 30
+                    s += minOf(10, ((copies[r.url.substringBefore('#')] ?: 1) - 1) * 5)
+                    FileResult(r.copy(coherent = coherent), ext, ext.isNotEmpty(), s.toInt().coerceIn(0, 100))
+                }
+                .filter { it.direct || it.result.coherent }
+                .sortedWith(
+                    compareByDescending<FileResult> { it.direct && it.result.coherent }
+                        .thenByDescending { it.result.coherent }
+                        .thenByDescending { it.score }
+                )
+                .take(50)
+        }
 
     /** Sources officielles pour les médicaments (par langue) ; "all" s'applique à toutes. */
     private val MED_SITES = mapOf(
@@ -219,8 +282,8 @@ object WebSearch {
 
     private fun clean(s: String) = Html.fromHtml(s, Html.FROM_HTML_MODE_LEGACY).toString().trim()
 
-    private fun bing(q: String, code: String): List<Result> {
-        val xml = get("https://www.bing.com/search?format=rss&setlang=$code&q=" + URLEncoder.encode(q, "UTF-8"))
+    private fun bing(q: String, code: String, first: Int = 1): List<Result> {
+        val xml = get("https://www.bing.com/search?format=rss&setlang=$code&first=$first&q=" + URLEncoder.encode(q, "UTF-8"))
         val out = mutableListOf<Result>()
         val p = Xml.newPullParser()
         p.setInput(StringReader(xml))
@@ -262,6 +325,114 @@ object WebSearch {
             if (href.startsWith("//")) href = "https:$href"
             if (!href.startsWith("http") || href.contains("duckduckgo.com/y.js")) continue
             out += Result(clean(m.groupValues[2]), href, "")
+        }
+        return out
+    }
+
+    // ---------- sources supplémentaires (recherche de fichiers) ----------
+    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+
+    /** Moteur indépendant Mojeek (page de résultats HTML). */
+    private fun mojeek(q: String): List<Result> {
+        val html = get("https://www.mojeek.com/search?q=" + enc(q))
+        val out = mutableListOf<Result>()
+        val re = Regex("<a([^>]*class=\"title\"[^>]*)>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+        for (m in re.findAll(html)) {
+            val href = Regex("href=\"([^\"]+)\"").find(m.groupValues[1])?.groupValues?.get(1)
+                ?.replace("&amp;", "&") ?: continue
+            if (!href.startsWith("http")) continue
+            out += Result(clean(m.groupValues[2]), href, "")
+        }
+        return out
+    }
+
+    /** Internet Archive : on cherche les livres/documents puis, pour les premiers, le fichier exact du format voulu. */
+    private suspend fun archiveOrg(title: String, exts: List<String>): List<Result> {
+        val words = title.replace(Regex("[\"():\\[\\]\\\\]"), " ").trim()
+        if (words.isEmpty()) return emptyList()
+        val q = "title:($words) AND mediatype:texts"
+        val j = JSONObject(get("https://archive.org/advancedsearch.php?q=" + enc(q) +
+            "&fl%5B%5D=identifier&fl%5B%5D=title&rows=12&output=json"))
+        val docs = j.optJSONObject("response")?.optJSONArray("docs") ?: return emptyList()
+        val items = (0 until docs.length()).mapNotNull { docs.optJSONObject(it) }
+            .mapNotNull { o -> o.optString("identifier").takeIf { it.isNotBlank() }?.let { it to o.optString("title").ifBlank { it } } }
+        return coroutineScope {
+            items.map { (id, name) ->
+                async {
+                    val files = runCatching {
+                        JSONObject(get("https://archive.org/metadata/$id")).optJSONArray("files")
+                    }.getOrNull()
+                    val found = mutableListOf<Result>()
+                    if (files != null) for (i in 0 until files.length()) {
+                        val f = files.optJSONObject(i)?.optString("name").orEmpty()
+                        val ext = extOf(f)
+                        if (ext in exts && found.size < 2) {
+                            found += Result(
+                                name, "https://archive.org/download/$id/" + enc(f).replace("+", "%20").replace("%2F", "/"),
+                                "Internet Archive", fileExt = ext
+                            )
+                        }
+                    }
+                    found.ifEmpty { listOf(Result(name, "https://archive.org/details/$id", "Internet Archive")) }
+                }
+            }.awaitAll().flatten()
+        }
+    }
+
+    /** Project Gutenberg (livres du domaine public) via l'API Gutendex : EPUB, MOBI, texte, PDF. */
+    private fun gutendex(title: String, exts: List<String>): List<Result> {
+        val mimes = mapOf(
+            "epub" to "application/epub+zip", "mobi" to "application/x-mobipocket-ebook",
+            "txt" to "text/plain", "pdf" to "application/pdf"
+        )
+        val wanted = exts.filter { it in mimes }
+        if (wanted.isEmpty()) return emptyList()
+        val a = JSONObject(get("https://gutendex.com/books/?search=" + enc(title))).optJSONArray("results")
+            ?: return emptyList()
+        val out = mutableListOf<Result>()
+        for (i in 0 until minOf(a.length(), 10)) {
+            val b = a.optJSONObject(i) ?: continue
+            val author = b.optJSONArray("authors")?.optJSONObject(0)?.optString("name").orEmpty()
+            val name = b.optString("title") + if (author.isNotBlank()) " — $author" else ""
+            val formats = b.optJSONObject("formats") ?: continue
+            for (ext in wanted) {
+                val key = formats.keys().asSequence().firstOrNull { it.startsWith(mimes.getValue(ext)) } ?: continue
+                out += Result(name, formats.optString(key), "Project Gutenberg", fileExt = ext)
+            }
+        }
+        return out
+    }
+
+    /** Wikimedia Commons : fichiers PDF, documents, etc. hébergés par la fondation Wikimedia. */
+    private fun commons(title: String, exts: List<String>): List<Result> {
+        val j = JSONObject(get(
+            "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6" +
+                "&gsrlimit=30&prop=imageinfo&iiprop=url&gsrsearch=" + enc(title)
+        ))
+        val pages = j.optJSONObject("query")?.optJSONObject("pages") ?: return emptyList()
+        val out = mutableListOf<Result>()
+        for (k in pages.keys()) {
+            val p = pages.optJSONObject(k) ?: continue
+            val url = p.optJSONArray("imageinfo")?.optJSONObject(0)?.optString("url").orEmpty()
+            val ext = extOf(url)
+            if (url.isNotBlank() && ext in exts) {
+                out += Result(p.optString("title").removePrefix("File:").substringBeforeLast('.'), url, "Wikimedia Commons", fileExt = ext)
+            }
+        }
+        return out
+    }
+
+    /** arXiv : articles scientifiques en PDF. */
+    private fun arxiv(title: String): List<Result> {
+        val xml = get("http://export.arxiv.org/api/query?max_results=10&search_query=all:" + enc(title))
+        val out = mutableListOf<Result>()
+        for (m in Regex("<entry>(.*?)</entry>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+            val e = m.groupValues[1]
+            val name = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL).find(e)?.groupValues?.get(1)
+                ?.replace(Regex("\\s+"), " ")?.trim() ?: continue
+            val href = Regex("<link[^>]*title=\"pdf\"[^>]*href=\"([^\"]+)\"").find(e)?.groupValues?.get(1)
+                ?: Regex("<link[^>]*href=\"([^\"]+)\"[^>]*title=\"pdf\"").find(e)?.groupValues?.get(1) ?: continue
+            out += Result(clean(name), href.replace("http://", "https://"), "arXiv", fileExt = "pdf")
         }
         return out
     }

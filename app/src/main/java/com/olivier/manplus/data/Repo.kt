@@ -164,6 +164,23 @@ val DOC_TYPES = listOf(
 
 const val CUSTOM_TYPE = "custom"
 
+/** Format de fichier proposé dans l'onglet « Fichiers » : [exts] = extensions acceptées. */
+data class FileFormat(val id: String, val label: String, val exts: List<String>)
+
+val FILE_FORMATS = listOf(
+    FileFormat("pdf", "PDF", listOf("pdf")),
+    FileFormat("epub", "EPUB", listOf("epub")),
+    FileFormat("mobi", "MOBI / AZW3", listOf("mobi", "azw3")),
+    FileFormat("doc", "Word", listOf("docx", "doc")),
+    FileFormat("xls", "Excel", listOf("xlsx", "xls")),
+    FileFormat("ppt", "PowerPoint", listOf("pptx", "ppt")),
+    FileFormat("txt", "Texte", listOf("txt")),
+    FileFormat("cbz", "BD (CBZ / CBR)", listOf("cbz", "cbr")),
+    FileFormat("zip", "ZIP", listOf("zip"))
+)
+
+const val CUSTOM_FORMAT = "custom"
+
 class NotPdfException : IOException("Le lien n'est pas un PDF")
 
 object Settings {
@@ -202,6 +219,14 @@ object Settings {
     var customMed: String
         get() = p.getString("customMed", "") ?: ""
         set(v) = p.edit().putString("customMed", v).apply()
+
+    /** Onglet « Fichiers » : dernier format choisi (id de FILE_FORMATS ou « custom ») et extension libre. */
+    var fileFormat: String
+        get() = p.getString("fileFormat", "pdf") ?: "pdf"
+        set(v) = p.edit().putString("fileFormat", v).apply()
+    var fileCustomExt: String
+        get() = p.getString("fileCustomExt", "") ?: ""
+        set(v) = p.edit().putString("fileCustomExt", v).apply()
 
     /** Documents favoris (identifiants), affichés en tête de la bibliothèque. */
     var favorites: Set<String>
